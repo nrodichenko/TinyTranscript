@@ -41,6 +41,18 @@ fn with<T>(f: impl FnOnce(&mut State) -> T) -> T {
     f(&mut STATE.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
+/// A notification from any thread (shown by the menu bar app's next refresh).
+pub fn notify(title: &str, text: &str) {
+    say(title, text);
+}
+
+/// Restart this app (the new work folder, a new version).
+pub fn restart_self() {
+    if let Ok(app) = running_app() {
+        restart_app(&app);
+    }
+}
+
 fn say(title: &str, text: &str) {
     with(|s| s.messages.push((title.to_string(), text.to_string())));
 }

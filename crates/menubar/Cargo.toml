@@ -28,10 +28,10 @@ objc2 = { version = "0.6.3", default-features = false, features = ["std"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "std", "objc2-core-foundation", "NSAffineTransform", "NSArray", "NSAttributedString", "NSData",
     "NSDate", "NSDictionary", "NSEnumerator", "NSGeometry", "NSObjCRuntime", "NSObject", "NSRunLoop",
-    "NSString", "NSTimer", "NSUserNotification",
+    "NSString", "NSTimer", "NSUserNotification", "NSUserDefaults", "NSURL", "NSError", "NSValue",
 ] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
-    "std", "objc2-core-foundation", "NSAffineTransform", "NSAlert", "NSAppearance", "NSApplication", "NSPanel", "NSAttributedString",
+    "std", "objc2-core-foundation", "NSAffineTransform", "NSAlert", "NSAppearance", "NSApplication", "NSPanel", "NSOpenPanel", "NSSavePanel", "NSAttributedString",
     "NSBezierPath", "NSBitmapImageRep", "NSBox", "NSButton", "NSButtonCell", "NSCell", "NSColor", "NSControl",
     "NSEvent", "NSFont", "NSFontDescriptor", "NSGradient", "NSGraphics", "NSGraphicsContext", "NSImage",
     "NSImageRep", "NSImageView", "NSLayoutConstraint", "NSMenu", "NSMenuItem", "NSResponder",

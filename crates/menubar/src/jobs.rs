@@ -60,6 +60,8 @@ const SPECS: [Spec; 3] = [
 
 #[derive(Default)]
 struct State {
+    /// no new runs (the work folder is being changed)
+    hold: bool,
     running: HashSet<&'static str>,
     kicked: HashSet<String>,
     paused: HashSet<String>,
@@ -159,7 +161,7 @@ fn worker(spec: &'static Spec) {
     let mut last_look = SystemTime::now();
     loop {
         std::thread::sleep(Duration::from_secs(1));
-        let (paused, kicked) = with(|s| (s.paused.contains(spec.label), s.kicked.remove(spec.label)));
+        let (paused, kicked) = with(|s| (s.paused.contains(spec.label) || s.hold, s.kicked.remove(spec.label)));
         if paused {
             continue;
         }
@@ -191,6 +193,23 @@ fn worker(spec: &'static Spec) {
         // what the job itself changed in the folder does not count as a change
         seen = folder_print();
     }
+}
+
+/// Stop starting jobs and wait until none runs (up to `wait`); false if one is still running.
+pub fn hold_and_wait(wait: Duration) -> bool {
+    with(|s| s.hold = true);
+    let t0 = SystemTime::now();
+    while with(|s| !s.running.is_empty()) {
+        if since(t0) > wait {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    true
+}
+
+pub fn release_hold() {
+    with(|s| s.hold = false);
 }
 
 /// Start every job's thread (once).

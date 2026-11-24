@@ -22,12 +22,47 @@ pub fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()))
 }
 
-/// The recordings inbox (`~/Downloads/recordings`, or `$RECORDINGS_ROOT`).
+/// The app's own settings, outside the work folder:
+/// `~/Library/Application Support/TinyTranscript/settings.json` ({"work_folder": "/path"}).
+pub fn settings_file() -> PathBuf {
+    home().join("Library/Application Support/TinyTranscript/settings.json")
+}
+
+pub fn default_work_folder() -> PathBuf {
+    home().join("Downloads").join("recordings")
+}
+
+static WORK_FOLDER: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// The work folder: the recordings inbox MacWhisper watches, with processed/ and
+/// speaker-matching/ in it. `$RECORDINGS_ROOT`, else the one chosen in the menu (settings.json),
+/// else `~/Downloads/recordings`. Read once per process; set_work_folder() changes it.
 pub fn recordings() -> PathBuf {
-    match std::env::var("RECORDINGS_ROOT") {
-        Ok(p) if !p.is_empty() => PathBuf::from(p),
-        _ => home().join("Downloads").join("recordings"),
+    if let Ok(p) = std::env::var("RECORDINGS_ROOT") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
     }
+    if let Some(p) = WORK_FOLDER.read().unwrap_or_else(|e| e.into_inner()).clone() {
+        return p;
+    }
+    let p = load_json(&settings_file())
+        .and_then(|v| v.get("work_folder").and_then(Value::as_str).map(PathBuf::from))
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(default_work_folder);
+    *WORK_FOLDER.write().unwrap_or_else(|e| e.into_inner()) = Some(p.clone());
+    p
+}
+
+/// Remember a new work folder (settings.json) for this process and the next ones.
+pub fn set_work_folder(p: &Path) -> Result<()> {
+    let file = settings_file();
+    fs::create_dir_all(file.parent().unwrap())?;
+    let mut v = load_json(&file).filter(Value::is_object).unwrap_or_else(|| serde_json::json!({}));
+    v["work_folder"] = Value::String(p.to_string_lossy().into_owned());
+    save_json(&file, &v)?;
+    *WORK_FOLDER.write().unwrap_or_else(|e| e.into_inner()) = Some(p.to_path_buf());
+    Ok(())
 }
 
 /// Logs, state, config: `<recordings>/speaker-matching`.

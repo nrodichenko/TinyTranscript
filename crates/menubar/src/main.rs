@@ -54,6 +54,23 @@ fn main() {
                 }
                 std::process::exit(0)
             }
+            // work-folder [--retarget OLD NEW BACKUP_DIR]: show the work folder and whether MacWhisper
+            // watches it; --retarget points MacWhisper's watch folder (TT_MW_PREFS_DOMAIN for a test copy)
+            "work-folder" => {
+                if all.get(2).is_some_and(|a| a == "--retarget") && all.len() == 6 {
+                    let p = |i: usize| std::path::PathBuf::from(&all[i]);
+                    if let Err(e) = menubar::workfolder::retarget_macwhisper(&p(3), &p(4), &p(5)) {
+                        die(&format!("{e:#}"));
+                    }
+                }
+                let wf = pipeline_common::recordings();
+                println!("work folder: {}", wf.display());
+                println!("MacWhisper watches it: {:?}", menubar::workfolder::macwhisper_watches(&wf));
+                for (path, on) in menubar::workfolder::watched_folders() {
+                    println!("  watched: {path}{}", if on { "" } else { " (off)" });
+                }
+                std::process::exit(0)
+            }
             "setup" => std::process::exit(menubar::setup::run(all.get(2).is_some_and(|a| a == "--dry-run"))),
             "install-agent" => match menubar::setup::install_agent() {
                 Ok(()) => std::process::exit(0),

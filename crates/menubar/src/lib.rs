@@ -14,3 +14,4 @@ pub mod rows;
 pub mod setup;
 pub mod status;
 pub mod update;
+pub mod workfolder;

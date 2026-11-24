@@ -1,4 +1,4 @@
-//! Pull audio dropped into a Google Drive folder into ~/Downloads/recordings for MacWhisper.
+//! Pull audio dropped into a Google Drive folder into the work folder (~/Downloads/recordings unless changed in the menu) for MacWhisper.
 //! Rust port of drive_fetch.py; same flags, config, state, lock, cache folder and log lines.
 //!
 //! Share a voice note or recording to the Drive folder "Recordings inbox". Within a minute this job
@@ -33,7 +33,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use util::{http_err, Exit, HttpError};
 
-const HELP: &str = "Pull audio dropped into a Google Drive folder into ~/Downloads/recordings for MacWhisper.
+const HELP: &str = "Pull audio dropped into a Google Drive folder into the work folder (~/Downloads/recordings unless changed in the menu) for MacWhisper.
 
 Run by the launch agent local.drive-recordings every minute. Manual use:
     drive_fetch              fetch what is new

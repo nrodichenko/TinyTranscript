@@ -38,7 +38,7 @@ fn xml_escape(s: &str) -> String {
 /// The launch agent for this Mac: this program, started at login and after a crash (not after
 /// Quit), with errors in speaker-matching/launchd-errors.log.
 pub fn agent_plist(exe: &Path) -> String {
-    let errors = common::meta().join("launchd-errors.log");
+    let errors = errors_log();
     format!(r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -69,8 +69,14 @@ pub fn agent_plist(exe: &Path) -> String {
 "#, exe = xml_escape(&exe.to_string_lossy()), errors = xml_escape(&errors.to_string_lossy()))
 }
 
+/// Crashes (launchd's stderr), outside the work folder so it can move: ~/Library/Logs/TinyTranscript.
+pub fn errors_log() -> PathBuf {
+    common::home().join("Library/Logs/TinyTranscript/launchd-errors.log")
+}
+
 /// Write the launch agent for this program and (re)start it.
 pub fn install_agent() -> Result<()> {
+    std::fs::create_dir_all(errors_log().parent().unwrap())?;
     let exe = std::env::current_exe()?.canonicalize()?;
     let plist = agent_plist_path();
     std::fs::create_dir_all(plist.parent().unwrap())?;

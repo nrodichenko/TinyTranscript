@@ -13,7 +13,7 @@ them, and TinyTranscript names the speakers by voice, gives each transcript a ti
   Google Drive: audio or video dropped into the Drive folder "Recordings inbox", every minute; the
   file is moved to the Drive trash once it is fetched. Both are optional; a source that is not set
   up does not run and is not shown.
-- **Transcription.** MacWhisper watches `~/Downloads/recordings` and writes a `.txt` with speaker
+- **Transcription.** MacWhisper watches the work folder (`~/Downloads/recordings` by default) and writes a `.txt` with speaker
   labels next to each recording.
 - **Speaker names.** For each transcript, every speaker's voice is compared with the voices of the
   people you have named in MacWhisper (MacWhisper's own voice model, run by the `vpembed` helper).
@@ -58,6 +58,18 @@ From a package (`TinyTranscript-<version>.zip`, made with `./package.sh`):
 Zoom keys go into the login keychain: `security add-generic-password -U -a "$USER" -s
 zoom-s2s-account-id -w` (and `zoom-s2s-client-id`, `zoom-s2s-client-secret`).
 
+## Work folder
+
+`~/Downloads/recordings` unless changed with "Change work folder…" in the menu (saved in
+`~/Library/Application Support/TinyTranscript/settings.json`). Changing it can move the waiting
+recordings, transcripts, settings and logs along, or start empty (choosing a folder that already
+is a work folder switches to it). MacWhisper reads its watch folders only when it starts, so if it
+watched the old folder it is quit (never while transcribing), its preferences are backed up
+(`speaker-matching/macwhisper-prefs-backup-*.plist`; `defaults import com.goodsnooze.MacWhisper
+<file>` restores one), its watch folder is pointed at the new one (its other watch folders and
+settings stay as they are), and it is started again. The menu warns when MacWhisper does not
+watch the work folder. `TinyTranscript work-folder` shows both.
+
 ## Updates
 
 Each release of this repository (made with `./release.sh`) carries the app alone and a
@@ -81,12 +93,12 @@ recording.
 
 ## Files
 
-Everything lives in `~/Downloads/recordings/speaker-matching/`:
+Everything lives in `speaker-matching/` inside the work folder:
 
 - `config.json` (speaker matching), `drive_config.json`, `zoom_config.json`: created with defaults
   on first run; each key is explained in its `_help` entry.
 - `match.log`, `drive.log`, `zoom.log`, `claude.log`: what each step did; the menu bar shows the
-  last line. `launchd-errors.log`: crashes only.
+  last line. Crashes: `~/Library/Logs/TinyTranscript/launchd-errors.log`.
 - `state.json`, `reports/<name>.json` (every speaker's best matches), `originals/` (MacWhisper's
   unnamed transcripts), `voiceprints/` (a copy of MacWhisper's voiceprints and a log of changes).
 

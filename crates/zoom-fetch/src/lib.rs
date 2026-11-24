@@ -1,4 +1,4 @@
-//! Pull new Zoom cloud recordings (audio only) into ~/Downloads/recordings for MacWhisper.
+//! Pull new Zoom cloud recordings (audio only) into the work folder (~/Downloads/recordings unless changed in the menu) for MacWhisper.
 //! Rust port of zoom_fetch.py; same flags, config, state, lock, cache folder and log lines.
 //!
 //! Each finished cloud recording that started after `zoom_since` (zoom_config.json) is downloaded
@@ -22,7 +22,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use util::{http_err, Exit, HttpError};
 
-const HELP: &str = "Pull new Zoom cloud recordings (audio only) into ~/Downloads/recordings for MacWhisper.
+const HELP: &str = "Pull new Zoom cloud recordings (audio only) into the work folder (~/Downloads/recordings unless changed in the menu) for MacWhisper.
 
 Run by the launch agent local.zoom-recordings every 10 minutes. Manual use:
     zoom_fetch              fetch what is new
@@ -60,15 +60,13 @@ fn default_config() -> Value {
             "zoom_user": "Zoom user whose cloud recordings are fetched (user ID or email)",
             "zoom_since": "only recordings that started after this UTC time are fetched",
             "generic_topics": "regexes for Zoom topics that say nothing about the meeting",
-            "also_look_in": "folders where an already-downloaded copy (same GMT..._Recording prefix) means skip",
+            "also_look_in": "folders, besides the work folder, where an already-downloaded copy (same GMT..._Recording prefix) means skip",
         },
         "zoom_user": "",
         // a new config starts from now: older recordings are not fetched
         "zoom_since": Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
         "generic_topics": ["'s Zoom Meeting$", "Personal Meeting Room", "^Zoom Meeting$", "^Meeting$"],
-        "also_look_in": ["~/Downloads", "~/Downloads/recordings", "~/Downloads/recordings/processed",
-                         "~/Downloads/recordings/processed/audio",
-                         "~/Downloads/recordings/speaker-matching/originals"],
+        "also_look_in": ["~/Downloads"],
     })
 }
 
@@ -238,9 +236,12 @@ fn zoom_stem(recording_start: &str) -> Result<String> {
     Ok(format!("GMT{}_Recording", parse_utc(recording_start)?.format("%Y%m%d-%H%M%S")))
 }
 
+/// A copy with this GMT..._Recording prefix in the work folder (inbox, processed, originals) or one
+/// of the configured folders.
 fn already_have(stem: &str, folders: &[String]) -> Result<bool> {
-    for folder in folders {
-        if util::dir_has_prefix(&util::expanduser(folder), stem)? {
+    let work = [common::recordings(), common::processed(), common::processed_audio(), common::originals()];
+    for dir in work.into_iter().chain(folders.iter().map(|f| util::expanduser(f))) {
+        if util::dir_has_prefix(&dir, stem)? {
             return Ok(true);
         }
     }

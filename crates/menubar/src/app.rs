@@ -154,6 +154,11 @@ define_class!(
             crate::recent::rename(self.mtm(), sender.tag());
         }
 
+        #[unsafe(method(changeWorkFolder:))]
+        fn change_work_folder(&self, _sender: Option<&AnyObject>) {
+            crate::workfolder::change(self.mtm());
+        }
+
         #[unsafe(method(update:))]
         fn update_action(&self, _sender: Option<&AnyObject>) {
             crate::update::menu_action();
@@ -242,7 +247,7 @@ fn load_icons(dir: &Path, style: &str) -> HashMap<&'static str, Retained<NSImage
 fn widths() -> Vec<Vec<String>> {
     let names = ["Telegram", "MacWhisper", "Claude"].into_iter().chain(JOBS.iter().map(|j| j.0));
     let states = TG_LABELS.iter().map(|(_, v)| *v).chain(
-        ["running", "idle", "paused", "not loaded", "transcribing", "not running", "working", "stuck"],
+        ["running", "idle", "paused", "not loaded", "transcribing", "not running", "not watching", "working", "stuck"],
     );
     let third = ["last 2026-11-22 00:00", "last Yesterday 00:00", "checked 2026-11-22 00:00", "checked 59 min ago"];
     [names.collect::<Vec<_>>(), states.collect(), third.to_vec()]
@@ -287,6 +292,8 @@ impl App {
         let open_rec = menu_item(mtm, "Open recordings folder", Some(sel!(openRecordings:)), &controller);
         let open_logs = menu_item(mtm, "Open logs", Some(sel!(openLogs:)), &controller);
         let i_update = menu_item(mtm, "Check for updates", Some(sel!(update:)), &controller);
+        let i_folder = menu_item(mtm, "Change work folder…", Some(sel!(changeWorkFolder:)), &controller);
+        i_folder.setToolTip(Some(&NSString::from_str(&format!("Now: {}", pipeline_common::recordings().display()))));
         let quit = menu_item(mtm, "Quit", Some(sel!(quit:)), &controller);
 
         // one row per source/job: symbol · name · state · last run, then its buttons
@@ -352,7 +359,7 @@ impl App {
             menu.addItem(item);
         }
         menu.addItem(&sep());
-        for item in [&i_recent, &i_login, &i_glogin, &open_rec, &open_logs, &i_icon, &i_update] {
+        for item in [&i_recent, &i_login, &i_glogin, &open_rec, &i_folder, &open_logs, &i_icon, &i_update] {
             menu.addItem(item);
         }
         menu.addItem(&sep());
@@ -365,6 +372,7 @@ impl App {
             (&open_rec, "folder"),
             (&open_logs, "doc.text"),
             (&i_update, "arrow.down.circle"),
+            (&i_folder, "folder.badge.gearshape"),
             (&i_icon, "paintbrush"),
             (&quit, "power"),
         ] {
@@ -637,6 +645,13 @@ impl App {
             row.set_button("open", "macwindow", "Open MacWhisper");
         }
         error |= mw.state == "not running"; // nothing gets transcribed until it runs again
+        // MacWhisper must watch the work folder, or nothing arriving there is transcribed
+        if crate::workfolder::macwhisper_watches(&p.recordings) == Some(false) && mw.state != "not running" {
+            row.set(&["MacWhisper", "not watching", "the work folder"]);
+            let tip = format!("In MacWhisper > Settings > Watch Folders, add {} (subfolder depth 0)", p.recordings.display());
+            row.set_alert(true, Some(&tip));
+            error = true;
+        }
 
         let (cl_state, cl_detail) = if pipeline_common::claude::available() {
             status::claude_status(&pipeline_common::claude::busy_file(), &pipeline_common::claude::log_file())
