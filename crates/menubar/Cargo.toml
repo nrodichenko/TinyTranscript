@@ -1,0 +1,40 @@
+[package]
+name = "menubar"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "recordings_menubar"
+path = "src/main.rs"
+
+[[bin]]
+name = "make_app"
+path = "src/bin/make_app.rs"
+
+[dependencies]
+pipeline-common.workspace = true
+zoom-fetch = { path = "../zoom-fetch" }
+drive-fetch = { path = "../drive-fetch" }
+match-speakers = { path = "../match-speakers" }
+anyhow.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+libc.workspace = true
+rusqlite.workspace = true
+ureq.workspace = true
+sha2.workspace = true
+objc2 = { version = "0.6.3", default-features = false, features = ["std"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std", "objc2-core-foundation", "NSAffineTransform", "NSArray", "NSAttributedString", "NSData",
+    "NSDate", "NSDictionary", "NSEnumerator", "NSGeometry", "NSObjCRuntime", "NSObject", "NSRunLoop",
+    "NSString", "NSTimer", "NSUserNotification",
+] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std", "objc2-core-foundation", "NSAffineTransform", "NSAlert", "NSAppearance", "NSApplication", "NSPanel", "NSAttributedString",
+    "NSBezierPath", "NSBitmapImageRep", "NSBox", "NSButton", "NSButtonCell", "NSCell", "NSColor", "NSControl",
+    "NSEvent", "NSFont", "NSFontDescriptor", "NSGradient", "NSGraphics", "NSGraphicsContext", "NSImage",
+    "NSImageRep", "NSImageView", "NSLayoutConstraint", "NSMenu", "NSMenuItem", "NSResponder",
+    "NSRunningApplication", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSStringDrawing", "NSText",
+    "NSTextField", "NSTrackingArea", "NSView", "NSWindow", "NSWorkspace",
+] }

@@ -1,0 +1,23 @@
+{
+  "_help": {
+    "zoom_user": "Zoom user whose cloud recordings are fetched (user ID or email)",
+    "zoom_since": "only recordings that started after this UTC time are fetched",
+    "generic_topics": "regexes for Zoom topics that say nothing about the meeting",
+    "also_look_in": "folders where an already-downloaded copy (same GMT..._Recording prefix) means skip"
+  },
+  "zoom_user": "",
+  "zoom_since": "2026-01-01T00:00:00Z",
+  "generic_topics": [
+    "'s Zoom Meeting$",
+    "Personal Meeting Room",
+    "^Zoom Meeting$",
+    "^Meeting$"
+  ],
+  "also_look_in": [
+    "~/Downloads",
+    "~/Downloads/recordings",
+    "~/Downloads/recordings/processed",
+    "~/Downloads/recordings/processed/audio",
+    "~/Downloads/recordings/speaker-matching/originals"
+  ]
+}

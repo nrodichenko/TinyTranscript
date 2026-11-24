@@ -1,0 +1,32 @@
+TinyTranscript: audio you put in a Google Drive folder is transcribed by MacWhisper on this Mac,
+with speakers named, and saved in Downloads/recordings/processed.
+
+You need: a Mac with Apple silicon (M1 or newer), MacWhisper, and a Google account.
+Optional: Claude Code (claude.com/claude-code), for titles and for reading free-form file names.
+
+Setup (about 5 minutes, once):
+
+1. Drag TinyTranscript.app into your Applications folder. Keep google-client.json next to it in this
+   folder (or put it in Downloads) until setup is done.
+
+2. Open TinyTranscript from Applications. macOS says it cannot check it: open System Settings >
+   Privacy & Security, scroll down, click "Open Anyway" next to TinyTranscript, and confirm.
+
+3. A Terminal window opens with the setup. It asks:
+   - your name as MacWhisper shows it in transcripts (so your own name is not in file names);
+   - to sign in to Google in the browser: choose your account. Google may say the app is not
+     verified: click "Continue" (it is a private app);
+   then it checks MacWhisper's settings. Fix anything marked with a cross in MacWhisper >
+   Settings > Watch Folders: watch Downloads/recordings, subfolder depth 0, export .txt with
+   speaker names. Allow Terminal to access Downloads if asked.
+
+4. TinyTranscript appears in the menu bar (a speech bubble). When macOS asks whether TinyTranscript may
+   access your Downloads folder, click Allow.
+
+Every day: put recordings (from your phone or computer) into the Google Drive folder
+"Recordings inbox". Within a minute they move to this Mac, MacWhisper transcribes them, and the
+finished transcript appears in Downloads/recordings/processed, named
+<date>_-_<title>_with_<other people>. In MacWhisper, name the voices you know (People): later
+recordings then get those names.
+
+The menu bar shows what is happening; "Open logs" shows details if something is red.

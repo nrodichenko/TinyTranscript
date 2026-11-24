@@ -1,0 +1,15 @@
+# Whitelist: only code is tracked. No personal data in this repo, not even as examples:
+# config files are created on each Mac at first run; private/ holds local notes and config copies.
+/*
+!/.gitignore
+!/README.md
+!/RECIPIENT.txt
+!/Cargo.toml
+!/Cargo.lock
+!/crates/
+/crates/**/target/
+!/install.sh
+!/package.sh
+!/release.sh
+!/version.sh
+!/vpembed.swift

@@ -1,0 +1,12 @@
+{
+  "_help": {
+    "folder_name": "Drive folder (in My Drive) that is watched; created on the first run",
+    "folder_id": "filled in on the first run; set it to watch another folder",
+    "trash_after_fetch": "move the Drive copy to the Drive trash once it is safely in the inbox",
+    "name_reader": "'claude': Claude Haiku reads free-format file names for a date and title; 'none': only names in the standard form are kept"
+  },
+  "folder_name": "Recordings inbox",
+  "folder_id": "",
+  "trash_after_fetch": true,
+  "name_reader": "claude"
+}
