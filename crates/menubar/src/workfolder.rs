@@ -224,18 +224,24 @@ pub fn change(mtm: MainThreadMarker) {
     let Some(new) = pick(mtm, &old) else { return };
     let (old_c, new_c) = (old.canonicalize().unwrap_or(old.clone()), new.canonicalize().unwrap_or(new.clone()));
     if old_c == new_c {
+        // the same folder: make sure MacWhisper watches it
+        if macwhisper_watches(&old) == Some(true) {
+            alert(mtm, "Nothing to change", &format!("{} is the work folder, and MacWhisper watches it.", old.display()), &["OK"]);
+        } else {
+            watch_work_folder(mtm);
+        }
         return;
     }
     if new_c.starts_with(&old_c) || old_c.starts_with(&new_c) {
         alert(mtm, "Choose another folder", "The new work folder cannot be inside the current one, or contain it.", &["OK"]);
         return;
     }
-    if crate::status::macwhisper_status(&old, &common::originals(), &common::home().join("Library/Application Support/MacWhisper/Database/main.sqlite")).state == "transcribing" {
+    if transcribing() {
         alert(mtm, "MacWhisper is transcribing", "Change the work folder once it is done.", &["OK"]);
         return;
     }
     let has_data = new.join("speaker-matching").is_dir();
-    let mw = if macwhisper_watches(&old) == Some(true) { "\n\nMacWhisper will be restarted to watch the new folder." } else { "" };
+    let mw = if macwhisper_watches(&old).is_some() { "\n\nMacWhisper will be restarted to watch the new folder." } else { "" };
     let text = format!("From {}\nto {}.{mw}", old.display(), new.display());
     let choice = if has_data {
         // the new folder already is a work folder: switch to it as it is
@@ -266,19 +272,59 @@ pub fn change(mtm: MainThreadMarker) {
     });
 }
 
+fn transcribing() -> bool {
+    crate::status::macwhisper_status(&common::recordings(), &common::originals(),
+        &common::home().join("Library/Application Support/MacWhisper/Database/main.sqlite")).state == "transcribing"
+}
+
+/// Make MacWhisper watch the work folder (menu: "Make MacWhisper watch the work folder", or the
+/// same folder chosen again): asks, then quits MacWhisper, adds the folder, starts it again.
+pub fn watch_work_folder(mtm: MainThreadMarker) {
+    let folder = common::recordings();
+    if macwhisper_watches(&folder).is_none() {
+        alert(mtm, "MacWhisper's settings cannot be read", "Is MacWhisper installed?", &["OK"]);
+        return;
+    }
+    if transcribing() {
+        alert(mtm, "MacWhisper is transcribing", "Try again once it is done.", &["OK"]);
+        return;
+    }
+    let r = alert(mtm, "MacWhisper does not watch the work folder",
+                  &format!("Add {} to MacWhisper's watch folders? MacWhisper is restarted for it.", folder.display()),
+                  &["Add and Restart MacWhisper", "Cancel"]);
+    if r != NSAlertFirstButtonReturn {
+        return;
+    }
+    std::thread::spawn(move || {
+        let result = (|| -> Result<()> {
+            let was_running = quit_macwhisper()?;
+            let r = retarget_macwhisper(&folder, &folder, &folder.join("speaker-matching"));
+            if was_running || r.is_ok() {
+                start_macwhisper();
+            }
+            r
+        })();
+        match result {
+            Ok(()) => crate::update::notify("MacWhisper watches the work folder", &folder.display().to_string()),
+            Err(e) => crate::update::notify("MacWhisper not changed", &format!("{e:#}")),
+        }
+    });
+}
+
 fn apply(old: &Path, new: &Path, move_data: bool) -> Result<()> {
     if !crate::jobs::hold_and_wait(Duration::from_secs(600)) {
         bail!("a job is still running after 10 minutes; try again later");
     }
-    let mw_watched_old = macwhisper_watches(old) == Some(true);
-    let mw_was_running = if mw_watched_old { quit_macwhisper()? } else { false };
+    // MacWhisper is to watch the new folder (it is pointed there whether or not it watched the old one)
+    let mw_readable = macwhisper_watches(old).is_some();
+    let mw_was_running = if mw_readable { quit_macwhisper()? } else { false };
     let result = (|| -> Result<()> {
         std::fs::create_dir_all(new)?;
         if move_data && old.is_dir() {
             move_contents(old, new)?;
         }
         common::set_work_folder(new)?;
-        if mw_watched_old {
+        if mw_readable {
             retarget_macwhisper(old, new, &new.join("speaker-matching"))?;
         }
         Ok(())

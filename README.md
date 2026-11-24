@@ -67,7 +67,8 @@ is a work folder switches to it). MacWhisper reads its watch folders only when i
 watched the old folder it is quit (never while transcribing), its preferences are backed up
 (`speaker-matching/macwhisper-prefs-backup-*.plist`; `defaults import com.goodsnooze.MacWhisper
 <file>` restores one), its watch folder is pointed at the new one (its other watch folders and
-settings stay as they are), and it is started again. The menu warns when MacWhisper does not
+settings stay as they are), and it is started again. Choosing the current folder again, or "Make MacWhisper watch the work folder…"
+(shown when it does not), adds the watch the same way. The menu warns when MacWhisper does not
 watch the work folder. `TinyTranscript work-folder` shows both.
 
 ## Updates

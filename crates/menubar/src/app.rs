@@ -159,6 +159,11 @@ define_class!(
             crate::workfolder::change(self.mtm());
         }
 
+        #[unsafe(method(watchWorkFolder:))]
+        fn watch_work_folder(&self, _sender: Option<&AnyObject>) {
+            crate::workfolder::watch_work_folder(self.mtm());
+        }
+
         #[unsafe(method(update:))]
         fn update_action(&self, _sender: Option<&AnyObject>) {
             crate::update::menu_action();
@@ -215,6 +220,7 @@ pub struct App {
     recent_menu: Retained<NSMenu>,
     header: RefCell<Option<Header>>,
     i_update: Retained<NSMenuItem>,
+    i_watch: Retained<NSMenuItem>,
     recent_sig: RefCell<String>,
     notifier: Option<Notifier>,
     ready_offset: Cell<u64>,
@@ -293,6 +299,8 @@ impl App {
         let open_logs = menu_item(mtm, "Open logs", Some(sel!(openLogs:)), &controller);
         let i_update = menu_item(mtm, "Check for updates", Some(sel!(update:)), &controller);
         let i_folder = menu_item(mtm, "Change work folder…", Some(sel!(changeWorkFolder:)), &controller);
+        let i_watch = menu_item(mtm, "Make MacWhisper watch the work folder…", Some(sel!(watchWorkFolder:)), &controller);
+        i_watch.setHidden(true);
         i_folder.setToolTip(Some(&NSString::from_str(&format!("Now: {}", pipeline_common::recordings().display()))));
         let quit = menu_item(mtm, "Quit", Some(sel!(quit:)), &controller);
 
@@ -359,7 +367,7 @@ impl App {
             menu.addItem(item);
         }
         menu.addItem(&sep());
-        for item in [&i_recent, &i_login, &i_glogin, &open_rec, &i_folder, &open_logs, &i_icon, &i_update] {
+        for item in [&i_recent, &i_login, &i_glogin, &i_watch, &open_rec, &i_folder, &open_logs, &i_icon, &i_update] {
             menu.addItem(item);
         }
         menu.addItem(&sep());
@@ -373,6 +381,7 @@ impl App {
             (&open_logs, "doc.text"),
             (&i_update, "arrow.down.circle"),
             (&i_folder, "folder.badge.gearshape"),
+            (&i_watch, "eye"),
             (&i_icon, "paintbrush"),
             (&quit, "power"),
         ] {
@@ -411,6 +420,7 @@ impl App {
             recent_menu,
             header: RefCell::new(header),
             i_update,
+            i_watch,
             recent_sig: RefCell::new(String::new()),
             notifier,
             ready_offset: Cell::new(ready_offset),
@@ -646,7 +656,9 @@ impl App {
         }
         error |= mw.state == "not running"; // nothing gets transcribed until it runs again
         // MacWhisper must watch the work folder, or nothing arriving there is transcribed
-        if crate::workfolder::macwhisper_watches(&p.recordings) == Some(false) && mw.state != "not running" {
+        let not_watching = crate::workfolder::macwhisper_watches(&p.recordings) == Some(false);
+        self.i_watch.setHidden(!not_watching);
+        if not_watching && mw.state != "not running" {
             row.set(&["MacWhisper", "not watching", "the work folder"]);
             let tip = format!("In MacWhisper > Settings > Watch Folders, add {} (subfolder depth 0)", p.recordings.display());
             row.set_alert(true, Some(&tip));
