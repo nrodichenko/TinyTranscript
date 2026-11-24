@@ -4,7 +4,8 @@
 //! MacWhisper (not sandboxed) keeps its watch folders in its preferences
 //! (com.goodsnooze.MacWhisper, `watchedFolders`: JSON strings {"id", "isEnabled", "path",
 //! "urlBookmark"}, the bookmark a plain base64 NSURL bookmark). It reads them when it starts, so:
-//! MacWhisper is quit (only when it is not transcribing), its preferences are backed up
+//! MacWhisper is quit (only when it is not transcribing; it comes back as it was: not running,
+//! running in the background without a window, or with its window), its preferences are backed up
 //! (speaker-matching/macwhisper-prefs-backup-<time>.plist, `defaults import` restores one), the
 //! entry for the old work folder is pointed at the new one (other watched folders and settings are
 //! left alone), and MacWhisper is started again.
@@ -14,7 +15,8 @@ use objc2::rc::Retained;
 use objc2::{AllocAnyThread, MainThreadMarker};
 use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApplication, NSModalResponseOK,
                     NSOpenPanel, NSRunningApplication};
-use objc2_foundation::{NSArray, NSString, NSURL, NSURLBookmarkCreationOptions, NSUserDefaults};
+use objc2::runtime::AnyObject;
+use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString, NSURL, NSURLBookmarkCreationOptions, NSUserDefaults};
 use pipeline_common as common;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -134,12 +136,49 @@ fn macwhisper_apps() -> Vec<Retained<NSRunningApplication>> {
     NSRunningApplication::runningApplicationsWithBundleIdentifier(&ns(MW_ID)).iter().collect()
 }
 
-/// Quit MacWhisper; true if it was running (and is now quit).
-fn quit_macwhisper() -> Result<bool> {
+/// How MacWhisper was before it was quit, so it comes back the same way.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Was {
+    NotRunning,
+    /// running, no window on screen (closed, minimized or hidden): started again hidden
+    Background,
+    /// running with a window on screen: started again normally (not brought to the front)
+    Visible,
+}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGWindowListCopyWindowInfo(option: u32, relative_to_window: u32) -> *mut NSArray<NSDictionary<NSString, AnyObject>>;
+}
+
+/// Normal windows (layer 0) of process `pid` on screen; owner and layer need no Screen Recording
+/// permission (window titles would).
+fn windows_on_screen(pid: i32) -> usize {
+    const ON_SCREEN_ONLY: u32 = 1; // kCGWindowListOptionOnScreenOnly
+    let Some(list) = (unsafe { Retained::from_raw(CGWindowListCopyWindowInfo(ON_SCREEN_ONLY, 0)) }) else { return 0 };
+    let num = |d: &NSDictionary<NSString, AnyObject>, k: &str| -> Option<i64> {
+        d.objectForKey(&ns(k)).and_then(|v| v.downcast::<NSNumber>().ok()).map(|n| n.longLongValue())
+    };
+    list.iter().filter(|d| num(d, "kCGWindowOwnerPID") == Some(pid as i64) && num(d, "kCGWindowLayer") == Some(0)).count()
+}
+
+/// How MacWhisper is now (what a restart would bring back), for `TinyTranscript work-folder`.
+pub fn macwhisper_state() -> String {
+    let apps = macwhisper_apps();
+    let was = if apps.is_empty() { Was::NotRunning }
+        else if apps.iter().any(|a| !a.isHidden() && windows_on_screen(a.processIdentifier()) > 0) { Was::Visible }
+        else { Was::Background };
+    let windows: usize = apps.iter().map(|a| windows_on_screen(a.processIdentifier())).sum();
+    format!("{was:?} ({windows} window(s) on screen)")
+}
+
+/// Quit MacWhisper, saying how it was.
+fn quit_macwhisper() -> Result<Was> {
     let apps = macwhisper_apps();
     if apps.is_empty() {
-        return Ok(false);
+        return Ok(Was::NotRunning);
     }
+    let visible = apps.iter().any(|a| !a.isHidden() && windows_on_screen(a.processIdentifier()) > 0);
     for a in &apps {
         a.terminate();
     }
@@ -150,11 +189,17 @@ fn quit_macwhisper() -> Result<bool> {
         }
         std::thread::sleep(Duration::from_millis(300));
     }
-    Ok(true)
+    Ok(if visible { Was::Visible } else { Was::Background })
 }
 
-fn start_macwhisper() {
-    let _ = Command::new("/usr/bin/open").args(["-g", "-b", MW_ID]).status();
+/// Start MacWhisper again as it was: not at all, hidden (-j), or normally; never to the front (-g).
+fn restore_macwhisper(was: Was) {
+    let args: &[&str] = match was {
+        Was::NotRunning => return,
+        Was::Background => &["-g", "-j", "-b", MW_ID],
+        Was::Visible => &["-g", "-b", MW_ID],
+    };
+    let _ = Command::new("/usr/bin/open").args(args).status();
 }
 
 /// Move every item of `from` into `to` (rename, or copy and delete across disks).
@@ -290,18 +335,16 @@ pub fn watch_work_folder(mtm: MainThreadMarker) {
         return;
     }
     let r = alert(mtm, "MacWhisper does not watch the work folder",
-                  &format!("Add {} to MacWhisper's watch folders? MacWhisper is restarted for it.", folder.display()),
+                  &format!("Add {} to MacWhisper's watch folders? If MacWhisper is running, it is restarted for it (as it is now, with or without its window).", folder.display()),
                   &["Add and Restart MacWhisper", "Cancel"]);
     if r != NSAlertFirstButtonReturn {
         return;
     }
     std::thread::spawn(move || {
         let result = (|| -> Result<()> {
-            let was_running = quit_macwhisper()?;
+            let was = quit_macwhisper()?;
             let r = retarget_macwhisper(&folder, &folder, &folder.join("speaker-matching"));
-            if was_running || r.is_ok() {
-                start_macwhisper();
-            }
+            restore_macwhisper(was); // closed stays closed, a background app comes back hidden
             r
         })();
         match result {
@@ -317,7 +360,7 @@ fn apply(old: &Path, new: &Path, move_data: bool) -> Result<()> {
     }
     // MacWhisper is to watch the new folder (it is pointed there whether or not it watched the old one)
     let mw_readable = macwhisper_watches(old).is_some();
-    let mw_was_running = if mw_readable { quit_macwhisper()? } else { false };
+    let mw_was = if mw_readable { quit_macwhisper()? } else { Was::NotRunning };
     let result = (|| -> Result<()> {
         std::fs::create_dir_all(new)?;
         if move_data && old.is_dir() {
@@ -329,9 +372,7 @@ fn apply(old: &Path, new: &Path, move_data: bool) -> Result<()> {
         }
         Ok(())
     })();
-    if mw_was_running {
-        start_macwhisper();
-    }
+    restore_macwhisper(mw_was);
     result?;
     crate::update::notify("Work folder changed", &format!("Now {}", new.display()));
     std::thread::sleep(Duration::from_secs(4)); // let the notification show (refresh every 3 s)
@@ -378,5 +419,26 @@ mod tests {
         assert!(move_contents(&a, &b).is_err());
         assert_eq!(std::fs::read_to_string(b.join("x.m4a")).unwrap(), "1");
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    /// Run with --ignored: some running app has windows on screen.
+    #[test]
+    #[ignore]
+    fn sees_windows_of_running_apps() {
+        let ws = objc2_app_kit::NSWorkspace::sharedWorkspace();
+        let mut seen = Vec::new();
+        for a in ws.runningApplications().iter() {
+            let n = windows_on_screen(a.processIdentifier());
+            if n > 0 {
+                seen.push(format!("{} {n}", a.localizedName().map(|s| s.to_string()).unwrap_or_default()));
+            }
+        }
+        println!("apps with windows on screen: {seen:?}");
+        assert!(!seen.is_empty());
     }
 }

@@ -66,6 +66,7 @@ fn main() {
                 let wf = pipeline_common::recordings();
                 println!("work folder: {}", wf.display());
                 println!("MacWhisper watches it: {:?}", menubar::workfolder::macwhisper_watches(&wf));
+                println!("MacWhisper now: {}", menubar::workfolder::macwhisper_state());
                 for (path, on) in menubar::workfolder::watched_folders() {
                     println!("  watched: {path}{}", if on { "" } else { " (off)" });
                 }
