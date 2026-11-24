@@ -61,7 +61,7 @@ zoom-s2s-account-id -w` (and `zoom-s2s-client-id`, `zoom-s2s-client-secret`).
 ## Updates
 
 Each release of this repository (made with `./release.sh`) carries the app alone and a
-`latest.json` with its version and SHA-256. The app looks for a newer release a minute after it
+`latest.json` with its version and SHA-256. The app asks the GitHub API for the latest release a minute after it
 starts and every 6 hours; "Update to …" in the menu installs it. An update is installed only if its
 checksum matches and it is signed with the same certificate and identifier as the running app, so
 only builds signed with the maker's key are ever installed. The same signature keeps macOS's

@@ -1,7 +1,7 @@
 //! Updates from the GitHub releases of the repository this build came from (TT_UPDATE_REPO,
 //! "owner/name", set by version.sh from the git remote; empty: no updates).
 //!
-//! Each release (release.sh) has `latest.json` ({"version", "zip", "sha256"}) and the zip with the
+//! Each release (release.sh) has `latest.json` (found through the GitHub API) ({"version", "zip", "sha256"}) and the zip with the
 //! app alone. The app looks a minute after it starts and then every 6 hours; a newer version shows
 //! in the menu ("Update to …") and once as a notification. Installing: download, check the
 //! SHA-256, unpack, check that the new app is signed with the same certificate and identifier as
@@ -69,8 +69,15 @@ pub fn latest() -> Result<Release> {
     if REPO.is_empty() {
         bail!("this build has no update source");
     }
-    let url = format!("https://github.com/{REPO}/releases/latest/download/latest.json");
-    let v: Value = agent().get(&url).call().map_err(|e| anyhow!("checking for updates: {e}"))?.into_json()?;
+    // the API answers at once (the releases/latest/download link is cached for minutes);
+    // unauthenticated, 60 requests an hour, far more than a look every 6 hours
+    let api = format!("https://api.github.com/repos/{REPO}/releases/latest");
+    let rel: Value = agent().get(&api).set("Accept", "application/vnd.github+json").call()
+        .map_err(|e| anyhow!("checking for updates: {e}"))?.into_json()?;
+    let url = rel["assets"].as_array().into_iter().flatten()
+        .find(|a| a["name"] == "latest.json").and_then(|a| a["browser_download_url"].as_str())
+        .ok_or_else(|| anyhow!("the latest release has no latest.json"))?;
+    let v: Value = agent().get(url).call().map_err(|e| anyhow!("checking for updates: {e}"))?.into_json()?;
     let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string).ok_or_else(|| anyhow!("latest.json has no '{k}'"));
     let r = Release { version: s("version")?, zip: s("zip")?, sha256: s("sha256")?.to_lowercase() };
     if parse_version(&r.version).is_none() || r.zip.contains('/') || r.zip.contains("..") || r.sha256.len() != 64 {
