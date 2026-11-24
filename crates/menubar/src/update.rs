@@ -242,12 +242,15 @@ pub fn install_into(r: &Release, app: &Path, restart: bool) -> Result<PathBuf> {
     Ok(app.to_path_buf())
 }
 
-/// Start the new version: through the launch agent when it runs us, else with `open`.
+/// Start the new version: through the launch agent when there is one (it stops the running menu
+/// bar app, which may be this process), else with `open`.
 fn restart_app(app: &Path) {
-    if crate::setup::started_by_launchd() {
+    if crate::setup::agent_plist_path().exists() {
         let target = format!("gui/{}/{}", crate::status::uid(), crate::setup::AGENT_LABEL);
-        let _ = Command::new("/bin/launchctl").args(["kickstart", "-k", &target]).spawn();
-        std::thread::sleep(Duration::from_secs(10)); // launchd stops this process
+        let _ = Command::new("/bin/launchctl").args(["kickstart", "-k", &target]).status();
+        if crate::setup::started_by_launchd() {
+            std::thread::sleep(Duration::from_secs(10)); // launchd stops this process
+        }
     } else {
         let _ = Command::new("/bin/sh").arg("-c").arg(format!("sleep 1; /usr/bin/open '{}'", app.display())).spawn();
     }
