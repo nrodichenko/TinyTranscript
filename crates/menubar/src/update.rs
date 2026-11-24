@@ -215,7 +215,8 @@ pub fn install_into(r: &Release, app: &Path, restart: bool) -> Result<PathBuf> {
     }
     run("/usr/bin/codesign", &["--verify", "--deep", "--strict", &new_app.to_string_lossy()])
         .context("the update's signature is not valid; nothing was installed")?;
-    run("/usr/bin/codesign", &["--verify", &format!("-R=={req}"), &new_app.to_string_lossy()])
+    // "=..." is the requirement as text; the new app must meet this app's own requirement
+    run("/usr/bin/codesign", &["--verify", "-R", &format!("={req}"), &new_app.to_string_lossy()])
         .context("the update is not signed by the same certificate as this app; nothing was installed")?;
     let plist = new_app.join("Contents/Info.plist");
     let v = run("/usr/bin/plutil", &["-extract", "CFBundleShortVersionString", "raw", &plist.to_string_lossy()])?;
