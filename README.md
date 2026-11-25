@@ -73,6 +73,14 @@ MacWhisper and says when the watch is in place. The menu warns when MacWhisper d
 work folder or cannot open its entry for it, and "Make MacWhisper watch the work folder…" shows
 the steps again. `TinyTranscript work-folder` prints both.
 
+MacWhisper transcribes only files that arrive in its watch folder, not those already there when
+it starts or when the folder is added. A recording that arrived while MacWhisper was not running
+or could not open the folder would wait forever, so TinyTranscript moves such a recording out of
+the work folder and back (once per MacWhisper run, after 2 minutes, never one MacWhisper's log
+shows it has taken), which MacWhisper sees as a new arrival. "Hand waiting recordings to
+MacWhisper" in the menu (shown when a recording waits too long) does it at once;
+`TinyTranscript requeue --check` lists them.
+
 ## Updates
 
 Each release of this repository (made with `./release.sh`) carries the app alone and a

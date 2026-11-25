@@ -10,6 +10,7 @@ pub mod jobs;
 pub mod notify;
 pub mod preview;
 pub mod recent;
+pub mod requeue;
 pub mod rows;
 pub mod setup;
 pub mod status;

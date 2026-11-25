@@ -208,6 +208,19 @@ pub fn hold_and_wait(wait: Duration) -> bool {
     true
 }
 
+/// Like hold_and_wait, but only if no one else holds the jobs (a change of work folder); on a
+/// timeout the hold is released again.
+pub fn try_hold_and_wait(wait: Duration) -> bool {
+    if !with(|s| if s.hold { false } else { s.hold = true; true }) {
+        return false;
+    }
+    if hold_and_wait(wait) {
+        return true;
+    }
+    release_hold();
+    false
+}
+
 pub fn release_hold() {
     with(|s| s.hold = false);
 }

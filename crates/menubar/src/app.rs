@@ -161,6 +161,17 @@ define_class!(
             crate::workfolder::change(self.mtm());
         }
 
+        #[unsafe(method(requeue:))]
+        fn requeue_action(&self, _sender: Option<&AnyObject>) {
+            std::thread::spawn(|| {
+                let n = crate::requeue::run(true);
+                if n == 0 {
+                    crate::update::notify("Nothing handed to MacWhisper",
+                        "Every waiting recording is queued in MacWhisper, or a job is running; try again in a minute.");
+                }
+            });
+        }
+
         #[unsafe(method(watchWorkFolder:))]
         fn watch_work_folder(&self, _sender: Option<&AnyObject>) {
             crate::workfolder::watch_work_folder(self.mtm());
@@ -223,6 +234,7 @@ pub struct App {
     header: RefCell<Option<Header>>,
     i_update: Retained<NSMenuItem>,
     i_watch: Retained<NSMenuItem>,
+    i_requeue: Retained<NSMenuItem>,
     recent_sig: RefCell<String>,
     notifier: Option<Notifier>,
     ready_offset: Cell<u64>,
@@ -303,6 +315,8 @@ impl App {
         let i_folder = menu_item(mtm, "Change work folder…", Some(sel!(changeWorkFolder:)), &controller);
         let i_watch = menu_item(mtm, "Make MacWhisper watch the work folder…", Some(sel!(watchWorkFolder:)), &controller);
         i_watch.setHidden(true);
+        let i_requeue = menu_item(mtm, "Hand waiting recordings to MacWhisper", Some(sel!(requeue:)), &controller);
+        i_requeue.setHidden(true);
         i_folder.setToolTip(Some(&NSString::from_str(&format!("Now: {}", pipeline_common::recordings().display()))));
         let quit = menu_item(mtm, "Quit", Some(sel!(quit:)), &controller);
 
@@ -369,7 +383,7 @@ impl App {
             menu.addItem(item);
         }
         menu.addItem(&sep());
-        for item in [&i_recent, &i_login, &i_glogin, &i_watch, &open_rec, &i_folder, &open_logs, &i_icon, &i_update] {
+        for item in [&i_recent, &i_login, &i_glogin, &i_watch, &i_requeue, &open_rec, &i_folder, &open_logs, &i_icon, &i_update] {
             menu.addItem(item);
         }
         menu.addItem(&sep());
@@ -384,6 +398,7 @@ impl App {
             (&i_update, "arrow.down.circle"),
             (&i_folder, "folder.badge.gearshape"),
             (&i_watch, "eye"),
+            (&i_requeue, "arrow.clockwise"),
             (&i_icon, "paintbrush"),
             (&quit, "power"),
         ] {
@@ -423,6 +438,7 @@ impl App {
             header: RefCell::new(header),
             i_update,
             i_watch,
+            i_requeue,
             recent_sig: RefCell::new(String::new()),
             notifier,
             ready_offset: Cell::new(ready_offset),
@@ -662,6 +678,8 @@ impl App {
         let watch = crate::workfolder::macwhisper_watch(&p.recordings);
         let not_watching = matches!(watch, Watch::No | Watch::Unusable);
         self.i_watch.setHidden(!not_watching);
+        // recordings waiting longer than they should: maybe MacWhisper never saw them arrive
+        self.i_requeue.setHidden(not_watching || mw.state != "stuck");
         if not_watching && mw.state != "not running" {
             row.set(&["MacWhisper", "not watching", "the work folder"]);
             let tip = if watch == Watch::Unusable {

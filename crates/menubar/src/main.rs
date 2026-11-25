@@ -68,6 +68,14 @@ fn main() {
                 }
                 std::process::exit(0)
             }
+            // requeue --check: list the recordings MacWhisper missed (the app hands them to it; a
+            // second process could not hold the app's jobs while they are out of the folder)
+            "requeue" if all.get(2).is_some_and(|a| a == "--check") => {
+                for p in menubar::requeue::check() {
+                    println!("missed: {}", p.display());
+                }
+                std::process::exit(0)
+            }
             "setup" => std::process::exit(menubar::setup::run(all.get(2).is_some_and(|a| a == "--dry-run"))),
             "install-agent" => match menubar::setup::install_agent() {
                 Ok(()) => std::process::exit(0),
@@ -93,7 +101,7 @@ fn main() {
         return;
     }
     if let Some(a) = args.iter().find(|a| a.starts_with('-')) {
-        die(&format!("unknown option {a}\nusage: recordings_menubar [--version | setup | install-agent | zoom-fetch|drive-fetch|match-speakers ARGS | --render-preview DIR | --icon-sheet FILE.png]"));
+        die(&format!("unknown option {a}\nusage: recordings_menubar [--version | setup | install-agent | work-folder | requeue --check | zoom-fetch|drive-fetch|match-speakers ARGS | --render-preview DIR | --icon-sheet FILE.png]"));
     }
     // Opened from the Finder before setup: run the setup in Terminal instead.
     if !menubar::setup::started_by_launchd() && !menubar::setup::agent_plist_path().exists() {
@@ -109,6 +117,7 @@ fn main() {
     };
     menubar::jobs::start(); // Zoom, Drive and speaker matching run in this process
     menubar::update::start(); // looks for a newer release now and then
+    menubar::requeue::start(); // hands MacWhisper recordings it never saw arrive
     menubar::app::run();
 }
 
