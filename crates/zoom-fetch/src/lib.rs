@@ -395,7 +395,8 @@ fn run(args: &util::Args, connect: &dyn Fn() -> Result<Zoom>) -> Result<i32> {
                 zoom.download(url, &apath, a.get("file_size").and_then(Value::as_u64))?;
                 let (title, pending) = make_title(m, &rs, &generic)?;
                 let name = standard_name(&rs, &title)?;
-                fs::rename(&apath, common::recordings().join(format!("{name}.m4a")))?;
+                // never over a file that appeared since (the Drive job, or a name in another case)
+                let name = common::place_new(&apath, &common::recordings(), &name, ".m4a")?;
                 state.insert(id.clone(), json!({
                     "status": "fetched", "name": name, "title_pending": pending,
                     "topic": m.get("topic").cloned().unwrap_or(Value::Null),

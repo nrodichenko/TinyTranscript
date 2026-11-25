@@ -128,7 +128,11 @@ pub fn rename_speaker(session_hex: &str, speaker_hex: &str, name: &str, transcri
             rusqlite::params![name, src], |r| r.get(0)).ok();
         let lines = session_lines(&con, session_hex)?;
         let spans: Vec<_> = text::speaker_spans(&lines, 0.3).into_iter().filter(|(k, _)| *k == speaker_hex).collect();
-        let audio = session_media(&con, session_hex, py::stem(transcript))?;
+        let stem = py::stem(transcript).to_string();
+        let entry = obj(load_json_obj(&state_file()).get(transcript));
+        let own = |p: &Path| if entry.contains_key("inbox_audio") { own_audio(p, &entry, &stem) }
+            else { pipeline_common::name_key(py::stem(&file_name(p))) == pipeline_common::name_key(&stem) };
+        let audio = session_media(&con, session_hex, &own)?;
         (from, is_stub, n, target, spans, audio)
     };
     let voice = match (&audio, spans.is_empty()) {
@@ -203,10 +207,10 @@ pub fn rename_speaker(session_hex: &str, speaker_hex: &str, name: &str, transcri
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    const SCHEMA: &str = r#"
+    pub(crate) const SCHEMA: &str = r#"
         CREATE TABLE "session" ("id" BLOB PRIMARY KEY NOT NULL, "originalFilename" TEXT, "dateDeleted" DOUBLE, "hasBeenDiarized" BOOLEAN, "isTransient" BOOLEAN, "isFromWatchFolder" BOOLEAN, "dateCreated" DATETIME);
         CREATE TABLE "mediafile" ("sessionID" BLOB, "filename" TEXT, "type" TEXT, "dateCreated" DATETIME);
         CREATE TABLE "speaker" ("id" BLOB PRIMARY KEY NOT NULL, "name" TEXT NOT NULL, "color" TEXT, "isStub" BOOLEAN NOT NULL DEFAULT 0, "photoData" BLOB);
@@ -230,6 +234,7 @@ mod tests {
 
     #[test]
     fn renames_like_macwhisper() {
+        let _g = crate::TEST_ENV.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("mw-write-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("root/speaker-matching")).unwrap();

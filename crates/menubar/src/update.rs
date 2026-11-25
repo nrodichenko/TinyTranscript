@@ -242,7 +242,30 @@ pub fn install_into(r: &Release, app: &Path, restart: bool) -> Result<PathBuf> {
     if v.trim() != r.version {
         bail!("the update says it is {} instead of {}; nothing was installed", v.trim(), r.version);
     }
-    // swap next to the app (same volume): new copy in, old one out, old one removed
+    // The restart stops every job: wait until none runs (and not during a change of work folder),
+    // so none is cut off halfway through moving files.
+    if restart {
+        if crate::workfolder::changing() {
+            bail!("the work folder is being changed; nothing was installed, try again in a minute");
+        }
+        if !crate::jobs::try_hold_and_wait(Duration::from_secs(600)) {
+            bail!("a job is still running after 10 minutes; nothing was installed, try again later");
+        }
+    }
+    let result = swap(&new_app, app);
+    if result.is_err() && restart {
+        crate::jobs::release_hold();
+    }
+    result?;
+    let _ = std::fs::remove_dir_all(&work);
+    if restart {
+        restart_app(app);
+    }
+    Ok(app.to_path_buf())
+}
+
+/// Put `new_app` in place of `app`: copied in next to it (same volume), old one out, old one removed.
+fn swap(new_app: &Path, app: &Path) -> Result<()> {
     let dir = app.parent().ok_or_else(|| anyhow!("no folder"))?;
     let staged = dir.join(".TinyTranscript-update.app");
     let old = dir.join(".TinyTranscript-old.app");
@@ -255,11 +278,7 @@ pub fn install_into(r: &Release, app: &Path, restart: bool) -> Result<PathBuf> {
         return Err(anyhow!(e).context("putting the new version in place"));
     }
     let _ = std::fs::remove_dir_all(&old);
-    let _ = std::fs::remove_dir_all(&work);
-    if restart {
-        restart_app(app);
-    }
-    Ok(app.to_path_buf())
+    Ok(())
 }
 
 /// Start the new version: through the launch agent when there is one (it stops the running menu

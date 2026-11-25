@@ -583,3 +583,44 @@ fn default_config_file_as_python_writes_it() {
     // json.dumps(drive_fetch.DEFAULT_CONFIG, indent=2, ensure_ascii=False) + "\n", from the Python
     assert_eq!(common::to_pretty(&default_config()), include_str!("default_config.python.json"));
 }
+
+/// A file that cannot be converted is downloaded once, not every minute.
+#[test]
+fn unconvertible_file_is_not_fetched_again() {
+    let _g = SANDBOX.lock().unwrap_or_else(|e| e.into_inner());
+    let _root = sandbox();
+    let mut cfg = default_config();
+    cfg["folder_id"] = json!("inbox");
+    cfg["name_reader"] = json!("none");
+    cfg["trash_after_fetch"] = json!(false);
+    save_config(&cfg).unwrap();
+    common::save_json(&state_file(), &json!({})).unwrap();
+    let junk = b"not audio at all".to_vec();
+    let t0 = "2026-11-24T07:05:00.000Z";
+    let listing = json!({"files": [{"id": "u1", "name": "memo.ogg", "mimeType": "audio/ogg", "createdTime": t0,
+        "modifiedTime": t0, "parents": ["inbox"], "size": junk.len().to_string(), "md5Checksum": md5_hex(&junk)}]})
+        .to_string().into_bytes();
+    let junk2 = junk.clone();
+    let (base, seen) = fake_drive(move |m, p| match (m, p) {
+        ("GET", p) if p.starts_with("/files?") => (200, listing.clone()),
+        ("GET", p) if p.starts_with("/files/u1?alt=media") => (200, junk2.clone()),
+        _ => (404, b"{}".to_vec()),
+    });
+    let connect = || -> Result<Drive> { Ok(test_drive(&base)) };
+    let downloads = || seen.lock().unwrap().iter().filter(|r| r.starts_with("GET /files/u1?alt=media")).count();
+    assert_eq!(run(&util::Args::default(), &connect).unwrap(), 0);
+    assert_eq!(downloads(), 1);
+    assert_eq!(common::load_json(&state_file()).unwrap()["u1"]["status"], "unconvertible");
+    assert_eq!(run(&util::Args::default(), &connect).unwrap(), 0);
+    assert_eq!(downloads(), 1, "not downloaded again");
+}
+
+#[test]
+fn long_names_are_capped() {
+    let long = format!("20261124 - {}", "word ".repeat(40));
+    let n = standard_name(&long).unwrap();
+    let title = n.trim_start_matches("20261124_-_");
+    assert!(title.chars().count() <= TITLE_MAX && title.ends_with("word"), "{n}");
+    assert_eq!(cap_words("abc", 60), "abc");
+    assert_eq!(cap_words(&"x".repeat(70), 60).len(), 60);
+}

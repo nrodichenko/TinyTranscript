@@ -66,7 +66,8 @@ options:
 
 /// What a re-check of a transcript (new voiceprints, a speaker renamed) keeps from its earlier
 /// record; base_stem is the name without the '_with_<names>' part, which finish() rebuilds from it.
-const KEEP_ON_REPROCESS: [&str; 5] = ["macwhisper_name", "renamed_from", "title", "title_source", "base_stem"];
+const KEEP_ON_REPROCESS: [&str; 7] = ["macwhisper_name", "renamed_from", "title", "title_source", "base_stem",
+                                      "inbox_audio", "exclude_sessions"];
 
 // ------------------------------------------------------------------ paths
 
@@ -505,16 +506,22 @@ fn session_by_id(con: &Connection, session_hex: Option<&str>) -> Result<Option<(
     })
 }
 
-fn find_session(con: &Connection, stem: &str) -> Result<Option<(String, bool)>> {
+/// The newest MacWhisper session of a file named `stem`, other than the `exclude`d ones (those
+/// of finished recordings that had the same name).
+fn find_session(con: &Connection, stem: &str, exclude: &[String]) -> Result<Option<(String, bool)>> {
     let mut st = con.prepare(
         "select hex(id), hasBeenDiarized from session
          where originalFilename = ?1 and dateDeleted is null and coalesce(isTransient, 0) = 0
          order by isFromWatchFolder desc, dateCreated desc")?;
     let mut rows = st.query([stem])?;
-    Ok(match rows.next()? {
-        Some(r) => Some((r.get(0)?, py::truthy(Some(&sql_json(r.get(1)?))))),
-        None => None,
-    })
+    while let Some(r) = rows.next()? {
+        let h: String = r.get(0)?;
+        if exclude.iter().any(|x| x.eq_ignore_ascii_case(&h)) {
+            continue;
+        }
+        return Ok(Some((h, py::truthy(Some(&sql_json(r.get(1)?))))));
+    }
+    Ok(None)
 }
 
 /// Speaker id -> name for a session, in database order.
@@ -550,7 +557,9 @@ fn session_lines(con: &Connection, session_hex: &str) -> Result<Vec<Line>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-fn session_media(con: &Connection, session_hex: &str, stem: &str) -> Result<Option<PathBuf>> {
+/// The session's audio: MacWhisper's copy, else this recording's file (`own`: its audio in the
+/// recordings folder or processed/audio/, see own_audio).
+fn session_media(con: &Connection, session_hex: &str, own: &dyn Fn(&Path) -> bool) -> Result<Option<PathBuf>> {
     let mut st = con.prepare(
         "select filename from mediafile where sessionID = ?1 and type = 'original' order by dateCreated desc")?;
     let mut rows = st.query([hex_blob(session_hex)?])?;
@@ -565,12 +574,45 @@ fn session_media(con: &Connection, session_hex: &str, stem: &str) -> Result<Opti
         for p in entries(&d) {
             let n = file_name(&p);
             let suf = py::lower(py::suffix(&n));
-            if p.is_file() && py::stem(&n) == stem && suf != ".txt" && suf != ".json" {
+            if p.is_file() && suf != ".txt" && suf != ".json" && own(&p) {
                 return Ok(Some(p));
             }
         }
     }
     Ok(None)
+}
+
+/// (name, size, modification time) of an audio file: which file a recording's audio is, so a later
+/// file of the same name (a new recording dropped in) is not taken for it. Moves keep both.
+fn audio_id(p: &Path) -> Option<Value> {
+    let (m, s) = mtime_and_size(p).ok()?;
+    Some(json!([file_name(p), s, m]))
+}
+
+/// Whether `p` is the audio of the recording in `entry`: one of the files recorded when it was
+/// transcribed ("inbox_audio"); for entries from before that record, a file of its MacWhisper name
+/// that arrived before it was processed.
+pub(crate) fn own_audio(p: &Path, entry: &Map<String, Value>, stem: &str) -> bool {
+    let n = file_name(p);
+    let names_match = |want: &str| common::name_key(py::stem(&n)) == common::name_key(want);
+    if let Some(Value::Array(ids)) = entry.get("inbox_audio") {
+        // size and modification time: the name changes when it is filed under the title
+        return audio_id(p).is_some_and(|id| ids.iter().any(|x| py::eq(&x[1], &id[1]) && py::eq(&x[2], &id[2])));
+    }
+    let mw_name = entry.get("macwhisper_name").and_then(Value::as_str).unwrap_or(stem);
+    if !names_match(stem) && !names_match(mw_name) {
+        return false;
+    }
+    let done_at = entry.get("processed_at").and_then(Value::as_str)
+        .and_then(|t| chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%S").ok())
+        .and_then(|t| t.and_local_timezone(chrono::Local).single()).map(|t| t.timestamp() as f64);
+    match done_at {
+        None => true, // not processed yet: the file in the folder is its own
+        Some(t) => {
+            use std::os::unix::fs::MetadataExt;
+            fs::metadata(p).map(|m| (m.ctime() as f64) <= t + 60.0).unwrap_or(false)
+        }
+    }
 }
 
 // ------------------------------------------------------------------ matching
@@ -795,7 +837,9 @@ fn process(txt: &Path, cfg: &Cfg, state: &mut Map<String, Value>, vps: &[Voicepr
         let mut sess = session_by_id(&con, prev.get("session").and_then(Value::as_str))?;
         if sess.is_none() {
             let mw_name = prev.get("macwhisper_name").and_then(Value::as_str).filter(|s| !s.is_empty());
-            sess = find_session(&con, mw_name.unwrap_or(&txt_stem))?;
+            let exclude: Vec<String> = prev.get("exclude_sessions").and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+            sess = find_session(&con, mw_name.unwrap_or(&txt_stem), &exclude)?;
         }
         names_now = match &sess { Some((h, _)) => session_speaker_names(&con, h)?, None => vec![] };
         names_sig = if sess.is_some() {
@@ -821,7 +865,11 @@ fn process(txt: &Path, cfg: &Cfg, state: &mut Map<String, Value>, vps: &[Voicepr
         (session_hex, diarized) = (h, d);
         lines = session_lines(&con, &session_hex)?;
         spans = text::speaker_spans(&lines, 0.3);
-        audio = if diarized && !spans.is_empty() { session_media(&con, &session_hex, &txt_stem)? } else { None };
+        audio = if diarized && !spans.is_empty() {
+            session_media(&con, &session_hex, &|p| own_audio(p, &prev, &txt_stem))?
+        } else {
+            None
+        };
     }
 
     mkdir(&processed())?;
@@ -830,6 +878,7 @@ fn process(txt: &Path, cfg: &Cfg, state: &mut Map<String, Value>, vps: &[Voicepr
     if !diarized || spans.is_empty() {
         common::write_atomic(&out_path, &text)?;
         let mut e = kept(&prev);
+        record_inbox_audio(&mut e, &prev, &txt_stem);
         for (k, v) in [("source", src_sig), ("status", json!("no-speakers")), ("session", json!(session_hex)),
                        ("names_sig", json!(names_sig)), ("processed_at", json!(common::now_iso()))] {
             e.insert(k.into(), v);
@@ -886,6 +935,7 @@ fn process(txt: &Path, cfg: &Cfg, state: &mut Map<String, Value>, vps: &[Voicepr
     mkdir(&reports())?;
     write_json(&reports().join(format!("{txt_stem}.json")), &report, 2)?;
     let mut e = kept(&prev);
+    record_inbox_audio(&mut e, &prev, &txt_stem);
     for (k, v) in [("source", src_sig), ("status", json!("done")), ("session", json!(session_hex)),
                    ("names_sig", json!(names_sig)), ("lib_sig", json!(lib_sig)), ("unresolved", json!(unresolved)),
                    ("processed_at", json!(processed_at)), ("labels", Value::Object(labels_in_txt.clone()))] {
@@ -896,6 +946,17 @@ fn process(txt: &Path, cfg: &Cfg, state: &mut Map<String, Value>, vps: &[Voicepr
     log(&format!("{key} ({reason}): {} [{}s]{}", summary.join(", "), py::float_repr(seconds_taken),
                  if unresolved.is_empty() { String::new() } else { format!("; unresolved: {}", unresolved.join(", ")) }));
     Ok(true)
+}
+
+/// On the first processing, note which files in the recordings folder are this recording's audio.
+fn record_inbox_audio(e: &mut Map<String, Value>, prev: &Map<String, Value>, txt_stem: &str) {
+    if e.contains_key("inbox_audio") {
+        return;
+    }
+    let mw_name = prev.get("macwhisper_name").and_then(Value::as_str).unwrap_or(txt_stem).to_string();
+    let ids: Vec<Value> = audio_for(&mw_name, &recordings()).iter()
+        .filter(|p| own_audio(p, prev, txt_stem)).filter_map(|p| audio_id(p)).collect();
+    e.insert("inbox_audio".into(), Value::Array(ids));
 }
 
 fn status_done(entry: &Map<String, Value>) -> bool {
@@ -918,6 +979,63 @@ fn move_to_originals(txt: &Path, state: &Map<String, Value>) -> Result<bool> {
     fs::rename(txt, originals().join(&name)).with_context(|| format!("moving {}", txt.display()))?;
     log(&format!("{name}: moved MacWhisper's original to speaker-matching/originals/"));
     Ok(true)
+}
+
+/// A free stem for a transcript: `stem`, else `stem_2`, `stem_3`… (as macOS compares names, in
+/// every folder a transcript, its audio or report goes, and in the state).
+fn free_stem(stem: &str, state: &Map<String, Value>) -> String {
+    let taken = |n: &str| {
+        let k = common::name_key(n);
+        [processed(), processed_audio(), originals(), recordings(), reports()].iter()
+            .any(|d| entries(d).iter().any(|p| common::name_key(py::stem(&file_name(p))) == k))
+            || state.keys().any(|s| common::name_key(py::stem(s)) == k)
+    };
+    let mut i = 2;
+    let mut c = format!("{stem}_{i}");
+    while taken(&c) {
+        i += 1;
+        c = format!("{stem}_{i}");
+    }
+    c
+}
+
+/// A new MacWhisper transcript in the recordings folder with the name of a finished recording
+/// that kept its name (its original is in originals/): a new recording dropped in under a used
+/// name, when MacWhisper has another session of that name. It becomes its own recording,
+/// '<name>_2', which remembers MacWhisper's name (to find its session, other than those of the
+/// earlier recordings, and its audio). Without another session it is MacWhisper exporting the
+/// finished one again, which is processed as a changed transcript.
+fn separate_reused_names(state: &mut Map<String, Value>) -> Result<bool> {
+    let mut changed = false;
+    for (name, txt) in txt_files(&recordings()) {
+        let prev = obj(state.get(&name));
+        if !status_done(&prev) || !originals().join(&name).exists() {
+            continue;
+        }
+        let stem = py::stem(&name).to_string();
+        let mw_name = prev.get("macwhisper_name").and_then(Value::as_str).unwrap_or(&stem).to_string();
+        // the sessions of every recording already filed under that MacWhisper name
+        let exclude: Vec<String> = state.iter()
+            .filter(|(k, e)| e.get("macwhisper_name").and_then(Value::as_str).unwrap_or(py::stem(k)) == mw_name)
+            .filter_map(|(_, e)| e.get("session").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        let con = db()?;
+        if find_session(&con, &mw_name, &exclude)?.is_none() {
+            continue;
+        }
+        let new_stem = free_stem(&stem, state);
+        let dst = originals().join(format!("{new_stem}.txt"));
+        mkdir(&originals())?;
+        if !common::rename_new(&txt, &dst)? {
+            continue;
+        }
+        state.insert(format!("{new_stem}.txt"), json!({
+            "macwhisper_name": mw_name, "exclude_sessions": exclude, "first_seen": common::now_ts(),
+        }));
+        log(&format!("{name}: a new recording with the name of a finished one; filed as {new_stem}.txt"));
+        changed = true;
+    }
+    Ok(changed)
 }
 
 /// Recordings saved under a temporary name by zoom_fetch ('<date>_-_Zoom_call_HHMM'), drive_fetch
@@ -960,7 +1078,8 @@ fn audio_for(stem: &str, folder: &Path) -> Vec<PathBuf> {
         .filter(|p| {
             let n = file_name(p);
             let suf = py::lower(py::suffix(&n));
-            p.is_file() && py::stem(&n) == stem && ![".txt", ".json", ".vtt", ".part"].contains(&suf.as_str())
+            p.is_file() && common::name_key(py::stem(&n)) == common::name_key(stem)
+                && ![".txt", ".json", ".vtt", ".part"].contains(&suf.as_str())
         })
         .collect()
 }
@@ -1020,8 +1139,13 @@ fn finish(name: &str, state: &mut Map<String, Value>, cfg: &Cfg, pending: &Map<S
         new_stem += &format!("_with_{}", people.iter().map(|p| p.replace(' ', "_")).collect::<Vec<_>>().join("_"));
     }
     if new_stem != stem {
-        let clash = |n: &str| [processed(), processed_audio(), originals(), recordings()].iter()
-            .any(|d| entries(d).iter().any(|p| py::stem(&file_name(p)) == n));
+        // as macOS compares names (any case, any Unicode form), and in the state too
+        let clash = |n: &str| {
+            let k = common::name_key(n);
+            [processed(), processed_audio(), originals(), recordings(), reports()].iter()
+                .any(|d| entries(d).iter().any(|p| common::name_key(py::stem(&file_name(p))) == k))
+                || state.keys().any(|s| common::name_key(py::stem(s)) == k)
+        };
         let (mut candidate, mut i) = (new_stem.clone(), 2);
         while candidate != stem && clash(&candidate) {
             candidate = format!("{new_stem}_{i}");
@@ -1033,7 +1157,14 @@ fn finish(name: &str, state: &mut Map<String, Value>, cfg: &Cfg, pending: &Map<S
     state.insert(name.to_string(), Value::Object(entry.clone()));
     let mut moves: Vec<(PathBuf, PathBuf)> = Vec::new();
     let suffix_of = |p: &Path| py::suffix(&file_name(p)).to_string();
-    for p in audio_for(&stem, &recordings()) {
+    // only this recording's audio: a file of the same name may be a new recording dropped in later
+    let mw_name = entry.get("macwhisper_name").and_then(Value::as_str).unwrap_or(&stem).to_string();
+    let mut inbox = audio_for(&mw_name, &recordings());
+    if mw_name != stem {
+        inbox.extend(audio_for(&stem, &recordings()));
+    }
+    inbox.dedup();
+    for p in inbox.into_iter().filter(|p| own_audio(p, &entry, &stem)) {
         let dst = processed_audio().join(format!("{new_stem}{}", suffix_of(&p)));
         moves.push((p, dst));
     }
@@ -1055,7 +1186,10 @@ fn finish(name: &str, state: &mut Map<String, Value>, cfg: &Cfg, pending: &Map<S
     }
     for (src, dst) in &moves {
         mkdir(&parent(dst))?;
-        fs::rename(src, dst).with_context(|| format!("moving {} to {}", src.display(), dst.display()))?;
+        // a file only differing in case or Unicode form is the same file to macOS: never over it
+        if !common::rename_new(src, dst).with_context(|| format!("moving {} to {}", src.display(), dst.display()))? {
+            bail!("not moving {} to {}: a file of that name is there", src.display(), dst.display());
+        }
     }
     if new_stem != stem {
         let new_name = format!("{new_stem}.txt");
@@ -1162,6 +1296,9 @@ fn run(argv: &[String]) -> Result<i32> {
         sync_library(&con, &cfg)?
     };
 
+    if separate_reused_names(&mut state)? {
+        write_json(&state_file(), &Value::Object(state.clone()), 2)?;
+    }
     // New MacWhisper exports sit in the recordings folder; processed ones were moved to originals/.
     // A new export wins over an older original of the same name.
     let mut available: HashMap<String, PathBuf> = HashMap::new();
@@ -1241,3 +1378,87 @@ pub fn job(argv: Vec<String>) -> i32 {
 pub fn main_with(argv: Vec<String>) -> ! {
     std::process::exit(job(argv))
 }
+
+/// Tests that set RECORDINGS_ROOT / RECORDINGS_MW_DB take this first.
+#[cfg(test)]
+pub(crate) static TEST_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+mod reuse_tests {
+    use super::*;
+
+    /// A finished recording 'rec' kept its name; a new 'rec.m4a' is dropped in and MacWhisper
+    /// transcribes it as a new session. The old audio stays; the new one becomes 'rec_2'.
+    #[test]
+    fn new_recording_with_a_used_name() {
+        let _g = TEST_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("reuse-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let root = dir.join("root");
+        for d in ["speaker-matching/originals", "processed/audio"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let db = dir.join("main.sqlite");
+        let con = Connection::open(&db).unwrap();
+        con.execute_batch(mw_write::tests::SCHEMA).unwrap();
+        // not diarized: no voice matching needed, the transcript is filed as it is
+        con.execute_batch("UPDATE session SET hasBeenDiarized = 0;
+                           INSERT INTO session VALUES (X'03', 'rec', NULL, 0, 0, 1, '2026-11-25');").unwrap();
+        drop(con);
+        std::env::set_var("RECORDINGS_MW_DB", &db);
+        std::env::set_var("RECORDINGS_ROOT", &root);
+        let mut cfg = default_config();
+        cfg["settle_seconds"] = json!(0);
+        common::save_json(&config_file(), &cfg).unwrap();
+
+        // the finished one
+        fs::write(processed().join("rec.txt"), "old transcript").unwrap();
+        fs::write(originals().join("rec.txt"), "old transcript").unwrap();
+        fs::write(processed_audio().join("rec.m4a"), "old audio").unwrap();
+        let (m, sz) = mtime_and_size(&originals().join("rec.txt")).unwrap();
+        let old_id = audio_id(&processed_audio().join("rec.m4a")).unwrap();
+        let state = json!({"rec.txt": {"source": {"mtime": m, "size": sz}, "status": "no-speakers", "session": "01",
+                                       "names_sig": "", "processed_at": "2026-11-24T10:00:00", "inbox_audio": [old_id]}});
+        write_json(&state_file(), &state, 2).unwrap();
+        // the new one, same name
+        fs::write(recordings().join("rec.m4a"), "new audio!").unwrap();
+        // first run: no transcript yet; the old recording must not take the new audio
+        assert_eq!(run(&["match_speakers".into()]).unwrap(), 0);
+        assert_eq!(fs::read_to_string(recordings().join("rec.m4a")).unwrap(), "new audio!");
+        fs::write(recordings().join("rec.txt"), "new transcript").unwrap();
+        assert_eq!(run(&["match_speakers".into()]).unwrap(), 0);
+
+        assert_eq!(fs::read_to_string(processed_audio().join("rec.m4a")).unwrap(), "old audio");
+        assert_eq!(fs::read_to_string(processed().join("rec.txt")).unwrap(), "old transcript");
+        assert_eq!(fs::read_to_string(processed().join("rec_2.txt")).unwrap(), "new transcript");
+        assert_eq!(fs::read_to_string(processed_audio().join("rec_2.m4a")).unwrap(), "new audio!");
+        assert!(!recordings().join("rec.m4a").exists());
+        let st = load_json_obj(&state_file());
+        assert_eq!(st["rec_2.txt"]["session"], "03");
+        assert_eq!(st["rec.txt"]["session"], "01");
+        std::env::remove_var("RECORDINGS_ROOT");
+        std::env::remove_var("RECORDINGS_MW_DB");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_new_never_replaces() {
+        let dir = std::env::temp_dir().join(format!("rename-new-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.txt"), dir.join("Standup.txt"));
+        fs::write(&a, "a").unwrap();
+        fs::write(&b, "b").unwrap();
+        // another case, and й composed vs decomposed: the same file to macOS
+        assert!(!common::rename_new(&a, &dir.join("standup.txt")).unwrap());
+        assert_eq!(fs::read_to_string(&b).unwrap(), "b");
+        fs::write(dir.join("\u{439}.txt"), "c").unwrap();
+        assert!(!common::rename_new(&a, &dir.join("\u{438}\u{306}.txt")).unwrap());
+        assert_eq!(common::name_key("\u{438}\u{306}X"), common::name_key("\u{439}x"));
+        assert!(common::dir_has_prefix(&dir, "STAND").unwrap());
+        assert_eq!(common::place_new(&a, &dir, "standup", ".txt").unwrap(), "standup_2");
+        assert_eq!(fs::read_to_string(dir.join("standup_2.txt")).unwrap(), "a");
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+

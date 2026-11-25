@@ -116,30 +116,60 @@ pub fn macwhisper_log_cannot_open(folder: &Path) -> bool {
     !text[at..].lines().skip(1).any(|l| l.contains("[folderWatcher]") && l.contains(&want))
 }
 
-/// Move every item of `from` into `to` (rename, or copy and delete across disks).
+/// Move every item of `from` into `to` (rename, or copy and delete across disks), all or nothing:
+/// if `to` already has an item of the same name (as macOS compares names) nothing is moved, and if
+/// a move fails the items moved so far are moved back.
 fn move_contents(from: &Path, to: &Path) -> Result<Vec<String>> {
     std::fs::create_dir_all(to)?;
-    let mut moved = Vec::new();
+    let there: Vec<String> = std::fs::read_dir(to)?.flatten()
+        .map(|e| common::name_key(&e.file_name().to_string_lossy())).collect();
+    let mut items = Vec::new();
     for e in std::fs::read_dir(from)? {
-        let e = e?;
-        let name = e.file_name();
+        let name = e?.file_name();
         if name == ".DS_Store" {
             continue;
         }
-        let dst = to.join(&name);
-        if dst.exists() {
-            bail!("{} already exists in the new folder; nothing more was moved", dst.display());
+        if there.contains(&common::name_key(&name.to_string_lossy())) {
+            bail!("{} already exists in the new folder; nothing was moved", to.join(&name).display());
         }
-        if std::fs::rename(e.path(), &dst).is_err() {
-            let st = Command::new("/usr/bin/ditto").arg(e.path()).arg(&dst).status()?;
-            if !st.success() {
-                bail!("copying {} failed", e.path().display());
-            }
-            if e.path().is_dir() { std::fs::remove_dir_all(e.path())? } else { std::fs::remove_file(e.path())? }
-        }
-        moved.push(name.to_string_lossy().into_owned());
+        items.push(name);
     }
-    Ok(moved)
+    let mut moved: Vec<std::ffi::OsString> = Vec::new();
+    let back = |moved: &[std::ffi::OsString]| for n in moved.iter().rev() {
+        let _ = move_one(&to.join(n), &from.join(n));
+    };
+    for name in &items {
+        if let Err(e) = move_one(&from.join(name), &to.join(name)) {
+            back(&moved);
+            return Err(e.context(format!("moving {}; everything moved so far was moved back", name.to_string_lossy())));
+        }
+        moved.push(name.clone());
+    }
+    Ok(moved.iter().map(|n| n.to_string_lossy().into_owned()).collect())
+}
+
+/// Move one item, never over another: a rename, or across disks a copy, then the original deleted.
+fn move_one(src: &Path, dst: &Path) -> Result<()> {
+    match common::rename_new(src, dst) {
+        Ok(true) => return Ok(()),
+        Ok(false) => bail!("{} exists", dst.display()),
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {}
+        Err(e) => return Err(e.into()),
+    }
+    let st = Command::new("/usr/bin/ditto").arg(src).arg(dst).status()?;
+    if !st.success() {
+        let _ = if dst.is_dir() { std::fs::remove_dir_all(dst) } else { std::fs::remove_file(dst) };
+        bail!("copying {} failed", src.display());
+    }
+    if src.is_dir() { std::fs::remove_dir_all(src)? } else { std::fs::remove_file(src)? }
+    Ok(())
+}
+
+static CHANGING: AtomicBool = AtomicBool::new(false);
+
+/// A change of work folder is under way (the updater waits for it).
+pub fn changing() -> bool {
+    CHANGING.load(Ordering::SeqCst)
 }
 
 fn alert(mtm: MainThreadMarker, title: &str, text: &str, buttons: &[&str]) -> isize {
@@ -177,6 +207,10 @@ fn pick(mtm: MainThreadMarker, current: &Path) -> Option<PathBuf> {
 pub fn change(mtm: MainThreadMarker) {
     if std::env::var_os("RECORDINGS_ROOT").is_some() {
         alert(mtm, "The work folder is set by RECORDINGS_ROOT", "Unset it to choose one here.", &["OK"]);
+        return;
+    }
+    if changing() {
+        alert(mtm, "The work folder is being changed", "Wait until it is done (the app restarts).", &["OK"]);
         return;
     }
     let old = common::recordings();
@@ -223,10 +257,14 @@ pub fn change(mtm: MainThreadMarker) {
         }
     };
     let (move_data, old2, new2) = (choice, old.clone(), new.clone());
+    if CHANGING.swap(true, Ordering::SeqCst) {
+        return;
+    }
     std::thread::spawn(move || {
         if let Err(e) = apply(&old2, &new2, move_data) {
             crate::update::notify("Work folder not changed", &format!("{e:#}"));
             crate::jobs::release_hold();
+            CHANGING.store(false, Ordering::SeqCst);
         }
     });
 }
@@ -329,17 +367,23 @@ pub fn after_start(mtm: MainThreadMarker) {
 }
 
 fn apply(old: &Path, new: &Path, move_data: bool) -> Result<()> {
-    if !crate::jobs::hold_and_wait(Duration::from_secs(600)) {
-        bail!("a job is still running after 10 minutes; try again later");
+    if crate::update::busy() {
+        bail!("an update is being installed; try again in a minute");
+    }
+    if !crate::jobs::try_hold_and_wait(Duration::from_secs(600)) {
+        bail!("a job is still running after 10 minutes (or files are being handed to MacWhisper); try again later");
     }
     if transcribing() {
         bail!("MacWhisper started transcribing; try again once it is done");
     }
     std::fs::create_dir_all(new)?;
-    if move_data && old.is_dir() {
-        move_contents(old, new)?;
+    let moved = if move_data && old.is_dir() { move_contents(old, new)? } else { vec![] };
+    if let Err(e) = common::set_work_folder(new) {
+        for n in moved.iter().rev() {
+            let _ = move_one(&new.join(n), &old.join(n));
+        }
+        return Err(e.context("saving the new work folder; everything was moved back"));
     }
-    common::set_work_folder(new)?;
     if !matches!(macwhisper_watch(new), Watch::Yes | Watch::Unknown) {
         let _ = std::fs::write(watch_help_marker(), "");
     }
@@ -381,10 +425,12 @@ mod tests {
         assert_eq!(moved, ["processed", "x.m4a"]);
         assert_eq!(std::fs::read_to_string(b.join("processed/t.txt")).unwrap(), "2");
         assert_eq!(std::fs::read_dir(&a).unwrap().count(), 0);
-        // never over an existing item
-        std::fs::write(a.join("x.m4a"), "3").unwrap();
+        // never over an existing item (also in another case), and then nothing at all is moved
+        std::fs::write(a.join("X.M4A"), "3").unwrap();
+        std::fs::write(a.join("y.m4a"), "4").unwrap();
         assert!(move_contents(&a, &b).is_err());
         assert_eq!(std::fs::read_to_string(b.join("x.m4a")).unwrap(), "1");
+        assert!(a.join("y.m4a").exists() && !b.join("y.m4a").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -145,15 +145,7 @@ pub fn expanduser(p: &str) -> PathBuf {
 
 /// Whether any entry of the folder `d` has a name starting with `prefix` (false if `d` is not a folder).
 pub fn dir_has_prefix(d: &Path, prefix: &str) -> Result<bool> {
-    if !d.is_dir() {
-        return Ok(false);
-    }
-    for e in fs::read_dir(d)? {
-        if e?.file_name().to_string_lossy().starts_with(prefix) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    Ok(pipeline_common::dir_has_prefix(d, prefix)?) // as macOS compares names: any case, any Unicode form
 }
 
 // ------------------------------------------------------------------ files and folders
@@ -161,10 +153,7 @@ pub fn dir_has_prefix(d: &Path, prefix: &str) -> Result<bool> {
 /// Where downloads land first: `~/Library/Caches/<name>` (outside the watch folder, same disk).
 /// `RECORDINGS_CACHE` replaces `~/Library/Caches`, for tests against a scratch RECORDINGS_ROOT.
 pub fn partial_dir(name: &str) -> PathBuf {
-    match std::env::var("RECORDINGS_CACHE") {
-        Ok(p) if !p.is_empty() => PathBuf::from(p).join(name),
-        _ => pipeline_common::home().join("Library").join("Caches").join(name),
-    }
+    pipeline_common::partial_dir(name)
 }
 
 /// Delete leftovers of interrupted runs (anything in `dir` older than a day).

@@ -459,11 +459,28 @@ fn standard_name(stem: &str) -> Option<String> {
     }
     let title = bad_chars().replace_all(&m[4], " ").replace('_', " ");
     let title = util::join_words(&title);
-    let title = title.trim_matches(|c| " -.".contains(c));
-    if !has_letter(title) {
+    let title = cap_words(title.trim_matches(|c| " -.".contains(c)), TITLE_MAX);
+    if !has_letter(&title) {
         return None;
     }
     Some(format!("{}{}{}_-_{}", &m[1], &m[2], &m[3], title.replace(' ', "_")))
+}
+
+/// The longest title kept from a Drive file name (as for a name read by Claude): file names stay
+/// well under macOS's 255 bytes with the date, '_with_<people>' and a number added.
+const TITLE_MAX: usize = 60;
+
+/// `t` cut to at most `max` characters, at a space if one is in the second half.
+fn cap_words(t: &str, max: usize) -> String {
+    if t.chars().count() <= max {
+        return t.to_string();
+    }
+    let head: String = t.chars().take(max + 1).collect();
+    let cut = match head.rfind(' ') {
+        Some(i) if head[..i].chars().count() >= max / 2 => head[..i].to_string(),
+        _ => t.chars().take(max).collect(),
+    };
+    cut.trim_end_matches(|c| " ,;-.".contains(c)).to_string()
 }
 
 /// Why a name could not be read. `Soft` is the Python's RuntimeError/ValueError (fall back to the
@@ -777,6 +794,12 @@ fn run(args: &util::Args, connect: &dyn Fn() -> Result<Drive>) -> Result<i32> {
             }
             continue;
         }
+        let changed_at = f.get("modifiedTime").and_then(Value::as_str).unwrap_or("").to_string();
+        if status == "unconvertible"
+            && entry.get("modifiedTime").and_then(Value::as_str) == Some(changed_at.as_str())
+            && entry.get("ffmpeg").and_then(Value::as_bool) == Some(common::tool("ffmpeg").is_some()) {
+            continue; // failed to convert; tried again once the file changes in Drive or ffmpeg is installed
+        }
         let mime = f.get("mimeType").cloned().unwrap_or(Value::Null);
         if mime.as_str() == Some(FOLDER_MIME) {
             continue;
@@ -817,18 +840,28 @@ fn run(args: &util::Args, connect: &dyn Fn() -> Result<Drive>) -> Result<i32> {
             let raw = partial.join(format!("{fid}{suffix}"));
             drive.download(f, &raw)?;
             let when = recorded_at(&raw, parse_drive_time(req_str(f, "createdTime")?)?);
-            let (name, pending) = make_name(&fname, when, &cfg)?;
+            // converted before it is named: a file that cannot be converted costs no Claude call
             let ready = if KEEP_AS_IS.contains(&suffix.as_str()) {
                 raw.clone()
             } else {
                 let ready = partial.join(format!("{fid}.m4a"));
-                convert(&raw, &ready)?;
+                let r = convert(&raw, &ready);
                 let _ = fs::remove_file(&raw);
+                r?;
                 ready
             };
+            let (name, pending) = match make_name(&fname, when, &cfg) {
+                Ok(n) => n,
+                Err(e) => {
+                    let _ = fs::remove_file(&ready);
+                    return Err(e.into());
+                }
+            };
             let ext = if ready == raw { suffix.clone() } else { ".m4a".to_string() };
+            // whole file into the watch folder at once, never over a file that appeared since (the
+            // Zoom job, or a name in another case)
+            let name = common::place_new(&ready, &common::recordings(), &name, &ext)?;
             let final_path = common::recordings().join(format!("{name}{ext}"));
-            fs::rename(&ready, &final_path).map_err(anyhow::Error::from)?; // whole file into the watch folder at once
             state.insert(fid.clone(), json!({
                 "status": "fetched", "name": name, "title_pending": pending, "drive_name": fname,
                 "recorded": util::utc_iso(when), "at": now, "trashed": false,
@@ -841,8 +874,16 @@ fn run(args: &util::Args, connect: &dyn Fn() -> Result<Drive>) -> Result<i32> {
         match fetched {
             Ok(()) => {}
             Err(FetchErr::Convert(stderr)) => {
+                // the same file converts no better next time: wait until it changes or ffmpeg is installed
                 let tail = &stderr[stderr.len().saturating_sub(300)..];
-                log(&format!("'{fname}': ERROR converting audio: {}; will retry", util::py_bytes_repr(tail)));
+                let ffmpeg = common::tool("ffmpeg").is_some();
+                state.insert(fid.clone(), json!({
+                    "status": "unconvertible", "drive_name": fname, "modifiedTime": changed_at,
+                    "ffmpeg": ffmpeg, "at": now, "error": util::py_bytes_repr(tail),
+                }));
+                save_state(&state)?;
+                log(&format!("'{fname}': ERROR converting audio: {}; left in Drive, not fetched again until it changes{}",
+                             util::py_bytes_repr(tail), if ffmpeg { "" } else { " or ffmpeg is installed (brew install ffmpeg)" }));
                 continue;
             }
             Err(FetchErr::Other(e)) => {

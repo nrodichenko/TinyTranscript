@@ -93,6 +93,68 @@ pub fn now_ts() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
 
+// ------------------------------------------------------------------ file names as macOS sees them
+
+/// A file name as APFS (and HFS+) compares names: case and Unicode form ignored, so "Standup" and
+/// "standup", or "й" composed and decomposed, are the same file.
+pub fn name_key(s: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    s.nfc().collect::<String>().to_lowercase()
+}
+
+/// Whether a file in `dir` has a name starting with `prefix` (as macOS compares names).
+pub fn dir_has_prefix(dir: &Path, prefix: &str) -> std::io::Result<bool> {
+    if !dir.is_dir() {
+        return Ok(false);
+    }
+    let want = name_key(prefix);
+    for e in std::fs::read_dir(dir)? {
+        if name_key(&e?.file_name().to_string_lossy()).starts_with(&want) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Rename `from` to `to` only if nothing is at `to` (macOS's own check, so also no file whose
+/// name differs only in case or Unicode form): Ok(false) if there is one. Never replaces a file.
+pub fn rename_new(from: &Path, to: &Path) -> std::io::Result<bool> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in a path"));
+    let (f, t) = (c(from)?, c(to)?);
+    if unsafe { libc::renamex_np(f.as_ptr(), t.as_ptr(), libc::RENAME_EXCL) } == 0 {
+        return Ok(true);
+    }
+    let e = std::io::Error::last_os_error();
+    if e.raw_os_error() == Some(libc::EEXIST) {
+        return Ok(false);
+    }
+    Err(e)
+}
+
+/// Move `from` into `dir` as `<stem><ext>`, or `<stem>_2<ext>`, `_3`… if that name is taken
+/// (also by a file that appeared since the name was chosen). Returns the stem used.
+pub fn place_new(from: &Path, dir: &Path, stem: &str, ext: &str) -> anyhow::Result<String> {
+    for i in 1..1000 {
+        let s = if i == 1 { stem.to_string() } else { format!("{stem}_{i}") };
+        if rename_new(from, &dir.join(format!("{s}{ext}")))? {
+            return Ok(s);
+        }
+    }
+    anyhow::bail!("no free name for {stem}{ext} in {}", dir.display())
+}
+
+/// Downloads in progress, on the work folder's disk (so the final move into the work folder is
+/// a rename, never a copy) and outside what MacWhisper watches (subfolder depth 0):
+/// speaker-matching/.partial/<name>. `$RECORDINGS_CACHE/<name>` for tests.
+pub fn partial_dir(name: &str) -> PathBuf {
+    match std::env::var("RECORDINGS_CACHE") {
+        Ok(p) if !p.is_empty() => PathBuf::from(p).join(name),
+        _ => meta().join(".partial").join(name),
+    }
+}
+
 /// Append `YYYY-MM-DD HH:MM:SS <msg>` to `file` and print it.
 pub fn log_to(file: &Path, msg: &str) {
     let line = format!("{} {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), msg);

@@ -649,6 +649,7 @@ dependencies = [
  "chrono",
  "libc",
  "serde_json",
+ "unicode-normalization",
 ]
 
 [[package]]
