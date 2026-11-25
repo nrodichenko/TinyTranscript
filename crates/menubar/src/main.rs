@@ -103,10 +103,19 @@ fn main() {
     if let Some(a) = args.iter().find(|a| a.starts_with('-')) {
         die(&format!("unknown option {a}\nusage: recordings_menubar [--version | setup | install-agent | work-folder | requeue --check | zoom-fetch|drive-fetch|match-speakers ARGS | --render-preview DIR | --icon-sheet FILE.png]"));
     }
-    // Opened from the Finder before setup: run the setup in Terminal instead.
+    // Opened from the Finder before setup: run the setup in Terminal instead. Once a setup has
+    // been started (and maybe abandoned), install the launch agent, which starts the app; the
+    // setup can be run again from Terminal for what it did not finish.
     if !menubar::setup::started_by_launchd() && !menubar::setup::agent_plist_path().exists() {
-        menubar::setup::open_in_terminal();
-        return;
+        let translocated = std::env::current_exe().unwrap_or_default().to_string_lossy().contains("/AppTranslocation/");
+        if !menubar::setup::setup_started() || translocated {
+            menubar::setup::open_in_terminal();
+            return;
+        }
+        match menubar::setup::install_agent() {
+            Ok(()) => return, // launchd starts the app now
+            Err(e) => eprintln!("recordings_menubar: launch agent: {e:#}; running without it"),
+        }
     }
     // One menu bar entry: a second copy (started by hand next to the launch agent's) quits.
     let lock = pipeline_common::meta().join(".menubar.lock");

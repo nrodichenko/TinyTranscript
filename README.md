@@ -49,11 +49,17 @@ From a package (`TinyTranscript-<version>.zip`, made with `./package.sh`):
    certificate, not an Apple Developer ID: confirm it once in System Settings > Privacy & Security >
    Open Anyway.
 2. A Terminal window runs `TinyTranscript setup`: your name as MacWhisper labels you (left out of
-   file names), the Google client (`google-client.json` next to the app or in Downloads) and the
-   Drive sign-in, a check of MacWhisper's settings and of Claude Code, and the launch agent (the
-   app starts at login). `TinyTranscript setup --dry-run` shows every step without changing
-   anything.
+   file names), Google Drive (optional: the Google client, `google-client.json` next to the app or
+   in Downloads, and the Drive sign-in; Return skips it), a check of MacWhisper's settings and of
+   Claude Code, and the launch agent (the app starts at login). A skipped or failed optional step
+   is listed at the end and does not stop the setup; `TinyTranscript setup` again adds it later.
+   `TinyTranscript setup --dry-run` asks the same questions and changes nothing.
 3. Allow TinyTranscript to access the Downloads folder when macOS asks.
+
+Opening the app again after a setup that was started but not finished installs the launch agent
+and starts the app. By hand: `/Applications/TinyTranscript.app/Contents/MacOS/TinyTranscript
+install-agent` writes the launch agent (`~/Library/LaunchAgents/local.recordings-menubar.plist`)
+and starts the app.
 
 Zoom keys go into the login keychain: `security add-generic-password -U -a "$USER" -s
 zoom-s2s-account-id -w` (and `zoom-s2s-client-id`, `zoom-s2s-client-secret`).

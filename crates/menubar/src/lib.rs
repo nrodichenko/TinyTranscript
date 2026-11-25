@@ -4,6 +4,10 @@
 /// YYYYMMDD.N from install.sh / package.sh (build.rs), or "dev".
 pub const VERSION: &str = env!("TT_BUILD_VERSION");
 
+/// Tests that set process-wide environment variables (RECORDINGS_ROOT) take this first.
+#[cfg(test)]
+pub(crate) static TEST_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub mod app;
 pub mod icons;
 pub mod jobs;

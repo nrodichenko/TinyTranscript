@@ -30,3 +30,7 @@ finished transcript appears in Downloads/recordings/processed, named
 recordings then get those names.
 
 The menu bar shows what is happening; "Open logs" shows details if something is red.
+
+If the menu bar icon does not appear after setup, open TinyTranscript from Applications once more,
+or run in Terminal:
+  /Applications/TinyTranscript.app/Contents/MacOS/TinyTranscript install-agent

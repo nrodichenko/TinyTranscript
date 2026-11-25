@@ -3,6 +3,7 @@
 # repository with the app-only zip and latest.json, which installed apps check every 6 hours.
 #
 #   ./release.sh            needs a clean, pushed working copy and the `gh` login
+#   TT_RELEASE_NOTES=text   put before the list of commits in the release notes
 #
 # The first-install package (dist/TinyTranscript-<version>.zip, optionally with the Google client)
 # is not published; give it to people directly.
@@ -20,6 +21,7 @@ SHA=$(shasum -a 256 "$UPDATE" | cut -d' ' -f1)
 printf '{"version": "%s", "zip": "%s", "sha256": "%s"}\n' "$TT_VERSION" "${UPDATE:t}" "$SHA" > dist/latest.json
 LAST=$(git describe --tags --abbrev=0 2>/dev/null || true)
 NOTES=$(git log --format='- %s' ${LAST:+$LAST..}HEAD)
+[[ -n "${TT_RELEASE_NOTES:-}" ]] && NOTES="$TT_RELEASE_NOTES"$'\n\n'"$NOTES"
 gh release create "v$TT_VERSION" "$UPDATE" dist/latest.json --repo "$TT_UPDATE_REPO" --target "$(git rev-parse HEAD)" \
   --title "TinyTranscript $TT_VERSION" --notes "${NOTES:-TinyTranscript $TT_VERSION}"
 git fetch -q --tags origin
