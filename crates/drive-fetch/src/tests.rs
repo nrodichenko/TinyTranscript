@@ -271,7 +271,7 @@ fn fake_drive(reply: impl Fn(&str, &str) -> (u16, Vec<u8>) + Send + 'static) -> 
 }
 
 fn test_drive(base: &str) -> Drive {
-    Drive { cred: json!({}), token: Some("tok".into()), listed: HashMap::new(), api: base.into(),
+    Drive { cred: json!({}), token: Some(("tok".into(), std::time::Instant::now() + Duration::from_secs(3600))), listed: HashMap::new(), api: base.into(),
             token_url: format!("{base}/token") }
 }
 
@@ -623,4 +623,27 @@ fn long_names_are_capped() {
     assert!(title.chars().count() <= TITLE_MAX && title.ends_with("word"), "{n}");
     assert_eq!(cap_words("abc", 60), "abc");
     assert_eq!(cap_words(&"x".repeat(70), 60).len(), 60);
+}
+
+/// An access token that stops working (401) is renewed once, and the call made again.
+#[test]
+fn renews_a_rejected_token() {
+    let calls = Arc::new(Mutex::new(0));
+    let c2 = calls.clone();
+    let (base, seen) = fake_drive(move |m, p| match (m, p) {
+        ("POST", "/token") => (200, br#"{"access_token": "fresh", "expires_in": 3599}"#.to_vec()),
+        ("GET", p) if p.starts_with("/files?") => {
+            let mut n = c2.lock().unwrap();
+            *n += 1;
+            if *n == 1 { (401, b"{}".to_vec()) } else { (200, br#"{"files": []}"#.to_vec()) }
+        }
+        _ => (404, b"{}".to_vec()),
+    });
+    let mut d = test_drive(&base);
+    d.cred = json!({"client_id": "i", "client_secret": "s", "refresh_token": "r"});
+    let v = d.json("GET", "/files", &[("q", "x")], None, None).unwrap();
+    assert_eq!(v["files"], json!([]));
+    assert_eq!(d.token.as_ref().unwrap().0, "fresh");
+    let reqs = seen.lock().unwrap().clone();
+    assert_eq!(reqs.iter().filter(|r| r.starts_with("POST /token")).count(), 1, "{reqs:?}");
 }

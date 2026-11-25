@@ -43,9 +43,10 @@ pub fn signature(meta: &Path) -> String {
     format!("{}|{}", mtime(&meta.join("state.json")), mtime(&meta.join("reports")))
 }
 
-/// "20261124_-_Планёрка_with_Boris" -> ("24 Nov", "Планёрка")
-fn describe(stem: &str) -> (String, String) {
-    let base = stem.split("_with_").next().unwrap_or(stem);
+/// "20261124_-_Планёрка_with_Boris" -> ("24 Nov", "Планёрка"). `base`: the name without the
+/// '_with_<people>' part, as the state keeps it (a title may itself contain "with").
+fn describe(stem: &str, base: Option<&str>) -> (String, String) {
+    let base = base.filter(|b| !b.is_empty()).unwrap_or_else(|| stem.split("_with_").next().unwrap_or(stem));
     let (date, title) = match base.split_once("_-_") {
         Some((d, t)) if d.len() == 8 && d.bytes().all(|b| b.is_ascii_digit()) => (d, t),
         _ => ("", base),
@@ -87,7 +88,7 @@ pub(crate) fn rebuild(menu: &NSMenu, mtm: MainThreadMarker, controller: &Control
     let people = match_speakers::mw_write::known_people().unwrap_or_default();
     for (key, entry) in done.into_iter().take(SHOWN) {
         let stem = key.strip_suffix(".txt").unwrap_or(key);
-        let (day, title) = describe(stem);
+        let (day, title) = describe(stem, entry.get("base_stem").and_then(Value::as_str));
         let session = entry["session"].as_str().unwrap_or("").to_string();
         let item = menu_item(mtm, &if day.is_empty() { title.clone() } else { format!("{day} · {title}") }, None, controller);
         let sub = NSMenu::new(mtm);

@@ -107,7 +107,7 @@ pub fn rename_speaker(session_hex: &str, speaker_hex: &str, name: &str, transcri
     let (sess, src) = (hex_blob(session_hex)?, hex_blob(speaker_hex)?);
 
     // Read and compute first (vpembed takes a while); the write below is short.
-    let (from, src_is_stub, src_sessions, target, spans, audio) = {
+    let (from, src_is_stub, src_sessions, spans, audio) = {
         let con = db()?;
         check_schema(&con)?;
         let mut st = con.prepare(
@@ -121,11 +121,6 @@ pub fn rename_speaker(session_hex: &str, speaker_hex: &str, name: &str, transcri
         if from == name {
             bail!("the speaker is already called {name}");
         }
-        // the existing person of that name with the most recordings
-        let target: Option<Vec<u8>> = con.query_row(
-            "select id from speaker s where isStub = 0 and name = ?1 and id != ?2
-             order by (select count(*) from session_speaker x where x.speakerID = s.id) desc limit 1",
-            rusqlite::params![name, src], |r| r.get(0)).ok();
         let lines = session_lines(&con, session_hex)?;
         let spans: Vec<_> = text::speaker_spans(&lines, 0.3).into_iter().filter(|(k, _)| *k == speaker_hex).collect();
         let stem = py::stem(transcript).to_string();
@@ -133,7 +128,7 @@ pub fn rename_speaker(session_hex: &str, speaker_hex: &str, name: &str, transcri
         let own = |p: &Path| if entry.contains_key("inbox_audio") { own_audio(p, &entry, &stem) }
             else { pipeline_common::name_key(py::stem(&file_name(p))) == pipeline_common::name_key(&stem) };
         let audio = session_media(&con, session_hex, &own)?;
-        (from, is_stub, n, target, spans, audio)
+        (from, is_stub, n, spans, audio)
     };
     let voice = match (&audio, spans.is_empty()) {
         (Some(a), false) => vpembed_means(a, &spans)?.into_iter().next(),
@@ -146,6 +141,12 @@ pub fn rename_speaker(session_hex: &str, speaker_hex: &str, name: &str, transcri
     check_schema(&con)?;
     daily_backup(&con)?;
     let tx = con.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    // looked up again inside the write transaction (one writer at a time): a rename that made a
+    // person of this name a moment ago (two quick "New name…") is found, not made twice
+    let target: Option<Vec<u8>> = tx.query_row(
+        "select id from speaker s where isStub = 0 and name = ?1 and id != ?2
+         order by (select count(*) from session_speaker x where x.speakerID = s.id) desc limit 1",
+        rusqlite::params![name, src], |r| r.get(0)).ok();
     let new_person = target.is_none();
     let (to_id, moved_lines, moved_vps) = match target {
         // A "Speaker N" stub belongs to this one recording: renaming it makes it the new person,

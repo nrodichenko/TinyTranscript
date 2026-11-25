@@ -182,16 +182,21 @@ fn worker(spec: &'static Spec) {
             last_run = Some(SystemTime::now()); // not set up (Zoom on a Drive-only Mac): look again next turn
             continue;
         }
-        with(|s| s.running.insert(spec.label));
+        // checked and marked running in one step: a hold (a change of work folder, an update)
+        // that came meanwhile wins, and hold_and_wait sees every job that starts
+        if !with(|s| !(s.hold || s.paused.contains(spec.label)) && s.running.insert(spec.label)) {
+            continue;
+        }
         last_run = Some(SystemTime::now());
+        // what changes in the folder from now on, also while the job runs (MacWhisper writing a
+        // transcript), starts the next run
+        seen = folder_print();
         let outcome = catch_unwind(AssertUnwindSafe(spec.run));
         with(|s| s.running.remove(spec.label));
         if outcome.is_err() {
             eprintln!("recordings: the {} job crashed (panic above)", spec.label);
             common::log_to(&common::meta().join(spec.log), "ERROR the job crashed (details in launchd-errors.log); retrying next time");
         }
-        // what the job itself changed in the folder does not count as a change
-        seen = folder_print();
     }
 }
 

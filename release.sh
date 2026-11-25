@@ -16,6 +16,11 @@ git fetch -q origin
 source "$REPO/version.sh"
 [[ -n "$TT_UPDATE_REPO" ]] || { echo "no GitHub remote"; exit 1; }
 "$REPO/package.sh" "$@"
+# installed apps take only an update signed with the same certificate: never publish an ad-hoc build
+REQ=$(codesign -dr - dist/TinyTranscript/TinyTranscript.app 2>&1 | grep '^designated' || true)
+[[ "$REQ" == *'identifier "local.recordings-pipeline"'*'certificate leaf'* ]] || {
+  echo "the build is not signed with the \"Recordings Pipeline (local)\" certificate; installed apps would refuse it, not published"
+  echo "  ($REQ)"; exit 1; }
 UPDATE="dist/TinyTranscript-$TT_VERSION-update.zip"
 SHA=$(shasum -a 256 "$UPDATE" | cut -d' ' -f1)
 printf '{"version": "%s", "zip": "%s", "sha256": "%s"}\n' "$TT_VERSION" "${UPDATE:t}" "$SHA" > dist/latest.json

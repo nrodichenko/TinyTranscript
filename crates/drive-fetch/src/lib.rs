@@ -208,7 +208,8 @@ fn login_json() -> Result<Value> {
 
 struct Drive {
     cred: Value,
-    token: Option<String>,
+    /// the access token and when to get a new one (a minute before Google says it expires)
+    token: Option<(String, std::time::Instant)>,
     /// file id -> parents, from list_inbox(); only these may be trashed
     listed: HashMap<String, Vec<String>>,
     api: String,
@@ -221,8 +222,10 @@ impl Drive {
     }
 
     fn token(&mut self) -> Result<String> {
-        if let Some(t) = &self.token {
-            return Ok(t.clone());
+        if let Some((t, until)) = &self.token {
+            if std::time::Instant::now() < *until {
+                return Ok(t.clone());
+            }
         }
         let form = [("client_id", req_str(&self.cred, "client_id")?), ("client_secret", req_str(&self.cred, "client_secret")?),
                     ("refresh_token", req_str(&self.cred, "refresh_token")?), ("grant_type", "refresh_token")];
@@ -245,7 +248,8 @@ impl Drive {
         };
         let d: Value = resp.into_json()?;
         let t = req_str(&d, "access_token")?.to_string();
-        self.token = Some(t.clone());
+        let secs = d.get("expires_in").and_then(Value::as_u64).unwrap_or(3600).saturating_sub(60).max(30);
+        self.token = Some((t.clone(), std::time::Instant::now() + Duration::from_secs(secs)));
         Ok(t)
     }
 
@@ -257,12 +261,19 @@ impl Drive {
         if !params.is_empty() {
             url += &format!("?{}", util::urlencode(params));
         }
-        let req = util::agent(120).request(method, &url).set("Authorization", &format!("Bearer {}", self.token()?));
-        let r = match body {
-            Some(b) => req.send_json(b),
-            None => req.call(),
-        };
-        r.map_err(http_err)
+        // a token that stopped working before its time (401): once more with a new one
+        for attempt in 0..2 {
+            let req = util::agent(120).request(method, &url).set("Authorization", &format!("Bearer {}", self.token()?));
+            let r = match body {
+                Some(b) => req.send_json(b),
+                None => req.call(),
+            };
+            match r {
+                Err(ureq::Error::Status(401, _)) if attempt == 0 => self.token = None,
+                r => return r.map_err(http_err),
+            }
+        }
+        unreachable!()
     }
 
     fn json(&mut self, method: &str, path: &str, params: &[(&str, &str)], body: Option<&Value>,

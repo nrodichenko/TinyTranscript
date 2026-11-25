@@ -326,6 +326,15 @@ fn db() -> Result<Connection> {
     Ok(con)
 }
 
+/// An error from MacWhisper's database being busy, locked or not openable, rather than from a
+/// transcript.
+fn db_unavailable(e: &anyhow::Error) -> bool {
+    use rusqlite::ErrorCode::{CannotOpen, DatabaseBusy, DatabaseLocked};
+    e.chain().any(|c| matches!(c.downcast_ref::<rusqlite::Error>(),
+        Some(rusqlite::Error::SqliteFailure(f, _)) if matches!(f.code, DatabaseBusy | DatabaseLocked | CannotOpen)))
+        || e.chain().any(|c| c.to_string() == "unable to open MacWhisper's database")
+}
+
 fn hex_blob(h: &str) -> Result<Vec<u8>> {
     if !h.len().is_multiple_of(2) || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
         bail!("unrecognized token: \"x'{h}'\"");
@@ -1227,7 +1236,9 @@ fn finish(name: &str, state: &mut Map<String, Value>, cfg: &Cfg, pending: &Map<S
 fn announce_ready(stem: &str, people: &[String]) -> Result<()> {
     static DATE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     let re = DATE.get_or_init(|| Regex::new(r"^\d{8}_-_").unwrap());
-    let head = stem.split("_with_").next().unwrap_or(stem);
+    // the exact '_with_<people>' ending: a title may itself contain "with" ("Call_with_Acme")
+    let with = format!("_with_{}", people.iter().map(|p| p.replace(' ', "_")).collect::<Vec<_>>().join("_"));
+    let head = if people.is_empty() { stem } else { stem.strip_suffix(&with).unwrap_or(stem) };
     let title = re.replace(head, "").replace('_', " ");
     let event = json!({"at": common::now_iso(), "name": format!("{stem}.txt"), "title": title,
                        "people": people.iter().filter(|p| !p.starts_with('+')).collect::<Vec<_>>()});
@@ -1336,6 +1347,12 @@ fn run(argv: &[String]) -> Result<i32> {
         })();
         let changed = match attempt {
             Ok(c) => c,
+            Err(e) if db_unavailable(&e) => {
+                // MacWhisper's database busy or being replaced (an update): not this transcript's fault;
+                // stop here without marking anything, the next run tries again
+                log(&format!("MacWhisper's database is not available ({e:#}); trying again next run"));
+                break;
+            }
             Err(e) => {
                 // keep going with other files; retry this one later
                 let src = if txt.exists() { txt.clone() } else { originals().join(&name) };
