@@ -107,6 +107,8 @@ define_class!(
         #[unsafe(method(tick:))]
         fn tick(&self, _timer: &NSTimer) {
             with_app(|a| a.refresh());
+            // outside with_app: it may show a dialog, during which this timer fires again
+            crate::workfolder::after_start(self.mtm());
         }
 
         #[unsafe(method(openRecordings:))]
@@ -656,13 +658,22 @@ impl App {
         }
         error |= mw.state == "not running"; // nothing gets transcribed until it runs again
         // MacWhisper must watch the work folder, or nothing arriving there is transcribed
-        let not_watching = crate::workfolder::macwhisper_watches(&p.recordings) == Some(false);
+        use crate::workfolder::Watch;
+        let watch = crate::workfolder::macwhisper_watch(&p.recordings);
+        let not_watching = matches!(watch, Watch::No | Watch::Unusable);
         self.i_watch.setHidden(!not_watching);
         if not_watching && mw.state != "not running" {
             row.set(&["MacWhisper", "not watching", "the work folder"]);
-            let tip = format!("In MacWhisper > Settings > Watch Folders, add {} (subfolder depth 0)", p.recordings.display());
+            let tip = if watch == Watch::Unusable {
+                format!("MacWhisper cannot open its watch folder entry for {}: remove it in MacWhisper > Settings > Watch Folder and add the folder again (subfolder depth 0)", p.recordings.display())
+            } else {
+                format!("In MacWhisper > Settings > Watch Folder, add {} (subfolder depth 0)", p.recordings.display())
+            };
             row.set_alert(true, Some(&tip));
             error = true;
+        } else if mw.state == "stuck" && crate::workfolder::macwhisper_log_cannot_open(&p.recordings) {
+            let tip = format!("MacWhisper could not open its watch folder when it started: remove {} in MacWhisper > Settings > Watch Folder and add it again", p.recordings.display());
+            row.set_alert(true, Some(&tip));
         }
 
         let (cl_state, cl_detail) = if pipeline_common::claude::available() {

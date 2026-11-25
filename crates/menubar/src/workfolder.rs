@@ -1,26 +1,25 @@
 //! "Change work folder…": pick a folder, optionally move transcripts, settings and logs there,
-//! point MacWhisper's watch folder at it, and restart.
+//! and restart; then MacWhisper is to watch the new folder.
 //!
-//! MacWhisper (not sandboxed) keeps its watch folders in its preferences
-//! (com.goodsnooze.MacWhisper, `watchedFolders`: JSON strings {"id", "isEnabled", "path",
-//! "urlBookmark"}, the bookmark a plain base64 NSURL bookmark). It reads them when it starts, so:
-//! MacWhisper is quit (only when it is not transcribing; it comes back as it was: not running,
-//! running in the background without a window, or with its window), its preferences are backed up
-//! (speaker-matching/macwhisper-prefs-backup-<time>.plist, `defaults import` restores one), the
-//! entry for the old work folder is pointed at the new one (other watched folders and settings are
-//! left alone), and MacWhisper is started again.
+//! MacWhisper keeps its watch folders in its preferences (com.goodsnooze.MacWhisper,
+//! `watchedFolders`: JSON strings {"id", "isEnabled", "path", "urlBookmark"}). The bookmark is a
+//! security-scoped one, which macOS lets only the app that made it resolve: an entry written by
+//! any other app (even with a plain bookmark of the right folder) is shown in MacWhisper's
+//! settings but never watched ("Could not resolve bookmark for folder" in its log). So
+//! TinyTranscript only reads that setting, and adding a watch folder is done in MacWhisper's own
+//! Settings > Watch Folder, with the steps shown and the path on the clipboard.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Result};
 use objc2::rc::Retained;
 use objc2::{AllocAnyThread, MainThreadMarker};
 use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApplication, NSModalResponseOK,
-                    NSOpenPanel, NSRunningApplication};
-use objc2::runtime::AnyObject;
-use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString, NSURL, NSURLBookmarkCreationOptions, NSUserDefaults};
+                    NSOpenPanel};
+use objc2_foundation::{NSData, NSDataBase64DecodingOptions, NSString, NSURL, NSUserDefaults};
 use pipeline_common as common;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const MW_ID: &str = "com.goodsnooze.MacWhisper";
@@ -42,164 +41,79 @@ fn mw_defaults() -> Option<Retained<NSUserDefaults>> {
     NSUserDefaults::initWithSuiteName(NSUserDefaults::alloc(), Some(&ns(&mw_domain())))
 }
 
-/// MacWhisper's watch folders: (path with a trailing '/', enabled).
-pub fn watched_folders() -> Vec<(String, bool)> {
+/// One of MacWhisper's watch folders.
+pub struct Watched {
+    /// with a trailing '/'
+    pub path: String,
+    pub enabled: bool,
+    /// MacWhisper cannot open it: its bookmark was not made by MacWhisper
+    pub unusable: bool,
+}
+
+/// MacWhisper's watch folders.
+pub fn watched_folders() -> Vec<Watched> {
     let Some(d) = mw_defaults() else { return vec![] };
     let Some(arr) = d.stringArrayForKey(&ns("watchedFolders")) else { return vec![] };
     arr.iter().filter_map(|s| serde_json::from_str::<Value>(&s.to_string()).ok())
-        .filter_map(|v| Some((v["path"].as_str()?.to_string(), v["isEnabled"].as_bool().unwrap_or(true))))
+        .filter_map(|v| Some(Watched {
+            path: with_slash(Path::new(v["path"].as_str()?)),
+            enabled: v["isEnabled"].as_bool().unwrap_or(true),
+            unusable: v["urlBookmark"].as_str().is_some_and(plain_bookmark),
+        }))
         .collect()
 }
 
-/// Whether MacWhisper watches `folder` (enabled); None if its settings cannot be read.
-pub fn macwhisper_watches(folder: &Path) -> Option<bool> {
+/// A plain (not security-scoped) bookmark, base64. A plain bookmark made outside a sandbox
+/// carries a readable sandbox extension ("…;com.apple.app-sandbox.read-write;…"); a
+/// security-scoped one, as MacWhisper makes, carries it encrypted. MacWhisper resolves its watch
+/// folders as security-scoped, so a plain one is never watched.
+fn plain_bookmark(b64: &str) -> bool {
+    let Some(data) = NSData::initWithBase64EncodedString_options(NSData::alloc(), &ns(b64), NSDataBase64DecodingOptions::empty())
+        else { return false };
+    let bytes = data.to_vec();
+    let needle = b"com.apple.app-sandbox.";
+    bytes.windows(needle.len()).any(|w| w == needle)
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Watch {
+    Yes,
+    No,
+    /// there is an entry for the folder, but MacWhisper cannot open it
+    Unusable,
+    /// MacWhisper's settings cannot be read
+    Unknown,
+}
+
+/// Whether MacWhisper watches `folder`.
+pub fn macwhisper_watch(folder: &Path) -> Watch {
     let w = watched_folders();
     if w.is_empty() && mw_defaults().is_none() {
-        return None;
+        return Watch::Unknown;
     }
     let want = with_slash(folder);
-    Some(w.iter().any(|(p, on)| *on && with_slash(Path::new(p)) == want))
-}
-
-/// A plain bookmark of `folder`, base64 (as MacWhisper stores it).
-fn bookmark(folder: &Path) -> Result<String> {
-    let url = NSURL::fileURLWithPath_isDirectory(&ns(&folder.to_string_lossy()), true);
-    let data = url.bookmarkDataWithOptions_includingResourceValuesForKeys_relativeToURL_error(
-        NSURLBookmarkCreationOptions::empty(), None, None)
-        .map_err(|e| anyhow!("bookmark for {}: {}", folder.display(), e.localizedDescription()))?;
-    Ok(data.base64EncodedStringWithOptions(objc2_foundation::NSDataBase64EncodingOptions::empty()).to_string())
-}
-
-/// Point MacWhisper's watch folder `old` (or, if it has none for `old`, a new entry) at `new`.
-/// Call with MacWhisper quit. Backs its preferences up into `backup_dir` first.
-pub fn retarget_macwhisper(old: &Path, new: &Path, backup_dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(backup_dir)?;
-    let backup = backup_dir.join(format!("macwhisper-prefs-backup-{}.plist", chrono::Local::now().format("%Y%m%d-%H%M%S")));
-    let st = Command::new("/usr/bin/defaults").args(["export", &mw_domain()]).arg(&backup).status()?;
-    if !st.success() {
-        bail!("could not back up MacWhisper's settings");
+    let mine: Vec<&Watched> = w.iter().filter(|e| e.enabled && e.path == want).collect();
+    if mine.iter().any(|e| !e.unusable) {
+        Watch::Yes
+    } else if mine.is_empty() {
+        Watch::No
+    } else {
+        Watch::Unusable
     }
-    let d = mw_defaults().ok_or_else(|| anyhow!("cannot open MacWhisper's settings"))?;
-    let current: Vec<String> = d.stringArrayForKey(&ns("watchedFolders")).map(|a| a.iter().map(|s| s.to_string()).collect()).unwrap_or_default();
-    let (old_s, new_s) = (with_slash(old), with_slash(new));
-    let mark = bookmark(new)?;
-    let mut entries: Vec<String> = Vec::new();
-    let mut replaced = false;
-    for s in current {
-        let mut v: Value = serde_json::from_str(&s).context("MacWhisper's watch folder setting changed format; nothing was written")?;
-        let path = v["path"].as_str().map(|p| with_slash(Path::new(p)));
-        if path.as_deref() == Some(old_s.as_str()) || path.as_deref() == Some(new_s.as_str()) {
-            if replaced {
-                continue; // one entry for the new folder
-            }
-            v["path"] = json!(new_s);
-            v["urlBookmark"] = json!(mark);
-            v["isEnabled"] = json!(true);
-            replaced = true;
-        }
-        if v.get("id").is_none() || v.get("urlBookmark").is_none() {
-            bail!("MacWhisper's watch folder setting changed format; nothing was written");
-        }
-        entries.push(v.to_string());
-    }
-    if !replaced {
-        let id = uuid4();
-        entries.push(json!({"id": id, "isEnabled": true, "path": new_s, "urlBookmark": mark}).to_string());
-    }
-    let arr = NSArray::from_retained_slice(&entries.iter().map(|s| ns(s)).collect::<Vec<_>>());
-    unsafe { d.setObject_forKey(Some(&arr), &ns("watchedFolders")) };
-    d.synchronize();
-    if macwhisper_watches(new) != Some(true) {
-        bail!("MacWhisper's settings did not take the new folder (backup: {})", backup.display());
-    }
-    Ok(())
 }
 
-fn uuid4() -> String {
-    let mut b = [0u8; 16];
-    for x in b.iter_mut() {
-        *x = rand_byte();
-    }
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    let h: String = b.iter().map(|x| format!("{x:02X}")).collect();
-    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
-}
-
-fn rand_byte() -> u8 {
-    let mut b = [0u8; 1];
-    let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut b));
-    b[0]
-}
-
-fn macwhisper_apps() -> Vec<Retained<NSRunningApplication>> {
-    NSRunningApplication::runningApplicationsWithBundleIdentifier(&ns(MW_ID)).iter().collect()
-}
-
-/// How MacWhisper was before it was quit, so it comes back the same way.
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Was {
-    NotRunning,
-    /// running, no window on screen (closed, minimized or hidden): started again hidden
-    Background,
-    /// running with a window on screen: started again normally (not brought to the front)
-    Visible,
-}
-
-#[link(name = "CoreGraphics", kind = "framework")]
-extern "C" {
-    fn CGWindowListCopyWindowInfo(option: u32, relative_to_window: u32) -> *mut NSArray<NSDictionary<NSString, AnyObject>>;
-}
-
-/// Normal windows (layer 0) of process `pid` on screen; owner and layer need no Screen Recording
-/// permission (window titles would).
-fn windows_on_screen(pid: i32) -> usize {
-    const ON_SCREEN_ONLY: u32 = 1; // kCGWindowListOptionOnScreenOnly
-    let Some(list) = (unsafe { Retained::from_raw(CGWindowListCopyWindowInfo(ON_SCREEN_ONLY, 0)) }) else { return 0 };
-    let num = |d: &NSDictionary<NSString, AnyObject>, k: &str| -> Option<i64> {
-        d.objectForKey(&ns(k)).and_then(|v| v.downcast::<NSNumber>().ok()).map(|n| n.longLongValue())
-    };
-    list.iter().filter(|d| num(d, "kCGWindowOwnerPID") == Some(pid as i64) && num(d, "kCGWindowLayer") == Some(0)).count()
-}
-
-/// How MacWhisper is now (what a restart would bring back), for `TinyTranscript work-folder`.
-pub fn macwhisper_state() -> String {
-    let apps = macwhisper_apps();
-    let was = if apps.is_empty() { Was::NotRunning }
-        else if apps.iter().any(|a| !a.isHidden() && windows_on_screen(a.processIdentifier()) > 0) { Was::Visible }
-        else { Was::Background };
-    let windows: usize = apps.iter().map(|a| windows_on_screen(a.processIdentifier())).sum();
-    format!("{was:?} ({windows} window(s) on screen)")
-}
-
-/// Quit MacWhisper, saying how it was.
-fn quit_macwhisper() -> Result<Was> {
-    let apps = macwhisper_apps();
-    if apps.is_empty() {
-        return Ok(Was::NotRunning);
-    }
-    let visible = apps.iter().any(|a| !a.isHidden() && windows_on_screen(a.processIdentifier()) > 0);
-    for a in &apps {
-        a.terminate();
-    }
-    let t0 = Instant::now();
-    while !macwhisper_apps().is_empty() {
-        if t0.elapsed() > Duration::from_secs(30) {
-            bail!("MacWhisper did not quit; quit it yourself and choose the folder again");
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
-    Ok(if visible { Was::Visible } else { Was::Background })
-}
-
-/// Start MacWhisper again as it was: not at all, hidden (-j), or normally; never to the front (-g).
-fn restore_macwhisper(was: Was) {
-    let args: &[&str] = match was {
-        Was::NotRunning => return,
-        Was::Background => &["-g", "-j", "-b", MW_ID],
-        Was::Visible => &["-g", "-b", MW_ID],
-    };
-    let _ = Command::new("/usr/bin/open").args(args).status();
+/// MacWhisper's newest log says it could not open its watch folder `folder` and has not reported
+/// a file in it since (for the "stuck" tip; the entry may have been fixed since, so not proof).
+pub fn macwhisper_log_cannot_open(folder: &Path) -> bool {
+    let dir = common::home().join("Library/Application Support/MacWhisper/Logs");
+    let Ok(rd) = std::fs::read_dir(&dir) else { return false };
+    let mut logs: Vec<PathBuf> = rd.flatten().map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "log")).collect();
+    logs.sort();
+    let Some(text) = logs.last().and_then(|p| std::fs::read_to_string(p).ok()) else { return false };
+    let want = with_slash(folder);
+    let Some(at) = text.rfind(&format!("Could not resolve bookmark for folder: {want}")) else { return false };
+    !text[at..].lines().skip(1).any(|l| l.contains("[folderWatcher]") && l.contains(&want))
 }
 
 /// Move every item of `from` into `to` (rename, or copy and delete across disks).
@@ -270,7 +184,7 @@ pub fn change(mtm: MainThreadMarker) {
     let (old_c, new_c) = (old.canonicalize().unwrap_or(old.clone()), new.canonicalize().unwrap_or(new.clone()));
     if old_c == new_c {
         // the same folder: make sure MacWhisper watches it
-        if macwhisper_watches(&old) == Some(true) {
+        if macwhisper_watch(&old) == Watch::Yes {
             alert(mtm, "Nothing to change", &format!("{} is the work folder, and MacWhisper watches it.", old.display()), &["OK"]);
         } else {
             watch_work_folder(mtm);
@@ -286,7 +200,7 @@ pub fn change(mtm: MainThreadMarker) {
         return;
     }
     let has_data = new.join("speaker-matching").is_dir();
-    let mw = if macwhisper_watches(&old).is_some() { "\n\nMacWhisper will be restarted to watch the new folder." } else { "" };
+    let mw = if macwhisper_watch(&old) != Watch::Unknown { "\n\nThen add it to MacWhisper's watch folders: TinyTranscript shows how." } else { "" };
     let text = format!("From {}\nto {}.{mw}", old.display(), new.display());
     let choice = if has_data {
         // the new folder already is a work folder: switch to it as it is
@@ -322,58 +236,113 @@ fn transcribing() -> bool {
         &common::home().join("Library/Application Support/MacWhisper/Database/main.sqlite")).state == "transcribing"
 }
 
-/// Make MacWhisper watch the work folder (menu: "Make MacWhisper watch the work folder", or the
-/// same folder chosen again): asks, then quits MacWhisper, adds the folder, starts it again.
+/// Make MacWhisper watch the work folder (menu: "Make MacWhisper watch the work folder…", the
+/// same folder chosen again, or after a change of work folder): MacWhisper accepts watch folders
+/// only from its own settings, so show the steps, put the path on the clipboard, open MacWhisper,
+/// and say when it watches the folder.
 pub fn watch_work_folder(mtm: MainThreadMarker) {
     let folder = common::recordings();
-    if macwhisper_watches(&folder).is_none() {
+    let state = macwhisper_watch(&folder);
+    if state == Watch::Unknown {
         alert(mtm, "MacWhisper's settings cannot be read", "Is MacWhisper installed?", &["OK"]);
         return;
     }
-    if transcribing() {
-        alert(mtm, "MacWhisper is transcribing", "Try again once it is done.", &["OK"]);
+    if state == Watch::Yes {
+        alert(mtm, "MacWhisper watches the work folder", &folder.display().to_string(), &["OK"]);
         return;
     }
-    let r = alert(mtm, "MacWhisper does not watch the work folder",
-                  &format!("Add {} to MacWhisper's watch folders? If MacWhisper is running, it is restarted for it (as it is now, with or without its window).", folder.display()),
-                  &["Add and Restart MacWhisper", "Cancel"]);
+    let want = with_slash(&folder);
+    let mut remove: Vec<String> = watched_folders().into_iter()
+        .filter(|e| e.unusable || (e.path == want && !e.enabled)).map(|e| e.path).collect();
+    remove.dedup();
+    let remove_step = if remove.is_empty() { String::new() } else {
+        format!("Remove {} (select it, then −): {}.\n",
+                if remove.len() == 1 { "this entry" } else { "these entries" },
+                if remove.iter().all(|p| *p == want) { "MacWhisper cannot open it".to_string() }
+                else { remove.join(", ") })
+    };
+    let text = format!(
+        "MacWhisper accepts watch folders only from its own settings.\n\n\
+         In MacWhisper, open Settings (⌘,) > Watch Folder.\n{remove_step}\
+         Click +, press ⇧⌘G, paste the path (⌘V; it is on the clipboard) and choose the folder:\n{}\n\
+         Keep the subfolder depth at 0.\n\nTinyTranscript says when MacWhisper watches it.",
+        folder.display());
+    let r = alert(mtm, "Add the work folder in MacWhisper", &text, &["Open MacWhisper", "Cancel"]);
     if r != NSAlertFirstButtonReturn {
         return;
     }
-    std::thread::spawn(move || {
-        let result = (|| -> Result<()> {
-            let was = quit_macwhisper()?;
-            let r = retarget_macwhisper(&folder, &folder, &folder.join("speaker-matching"));
-            restore_macwhisper(was); // closed stays closed, a background app comes back hidden
-            r
-        })();
-        match result {
-            Ok(()) => crate::update::notify("MacWhisper watches the work folder", &folder.display().to_string()),
-            Err(e) => crate::update::notify("MacWhisper not changed", &format!("{e:#}")),
+    copy_to_clipboard(&folder.to_string_lossy());
+    let _ = Command::new("/usr/bin/open").args(["-b", MW_ID]).status();
+    wait_for_watch(folder);
+}
+
+fn copy_to_clipboard(text: &str) {
+    if let Ok(mut c) = Command::new("/usr/bin/pbcopy").stdin(std::process::Stdio::piped()).spawn() {
+        if let Some(mut i) = c.stdin.take() {
+            let _ = std::io::Write::write_all(&mut i, text.as_bytes());
         }
+        let _ = c.wait();
+    }
+}
+
+static WAITING: AtomicBool = AtomicBool::new(false);
+
+/// Notify once MacWhisper watches `folder` (checked every 2 s for 20 minutes).
+fn wait_for_watch(folder: PathBuf) {
+    if WAITING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(1200) {
+            if macwhisper_watch(&folder) == Watch::Yes {
+                crate::update::notify("MacWhisper watches the work folder", &folder.display().to_string());
+                break;
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        WAITING.store(false, Ordering::SeqCst);
     });
+}
+
+/// Set by a change of work folder just before the app restarts: show the MacWhisper steps once
+/// it is up again.
+fn watch_help_marker() -> PathBuf {
+    common::settings_file().with_file_name("show-watch-help")
+}
+
+static AFTER_START: AtomicBool = AtomicBool::new(false);
+
+/// Called by the menu's timer: once per run, after a change of work folder, show the steps for
+/// MacWhisper if it does not watch the new folder.
+pub fn after_start(mtm: MainThreadMarker) {
+    if AFTER_START.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let marker = watch_help_marker();
+    if marker.exists() {
+        let _ = std::fs::remove_file(&marker);
+        if !matches!(macwhisper_watch(&common::recordings()), Watch::Yes | Watch::Unknown) {
+            watch_work_folder(mtm);
+        }
+    }
 }
 
 fn apply(old: &Path, new: &Path, move_data: bool) -> Result<()> {
     if !crate::jobs::hold_and_wait(Duration::from_secs(600)) {
         bail!("a job is still running after 10 minutes; try again later");
     }
-    // MacWhisper is to watch the new folder (it is pointed there whether or not it watched the old one)
-    let mw_readable = macwhisper_watches(old).is_some();
-    let mw_was = if mw_readable { quit_macwhisper()? } else { Was::NotRunning };
-    let result = (|| -> Result<()> {
-        std::fs::create_dir_all(new)?;
-        if move_data && old.is_dir() {
-            move_contents(old, new)?;
-        }
-        common::set_work_folder(new)?;
-        if mw_readable {
-            retarget_macwhisper(old, new, &new.join("speaker-matching"))?;
-        }
-        Ok(())
-    })();
-    restore_macwhisper(mw_was);
-    result?;
+    if transcribing() {
+        bail!("MacWhisper started transcribing; try again once it is done");
+    }
+    std::fs::create_dir_all(new)?;
+    if move_data && old.is_dir() {
+        move_contents(old, new)?;
+    }
+    common::set_work_folder(new)?;
+    if !matches!(macwhisper_watch(new), Watch::Yes | Watch::Unknown) {
+        let _ = std::fs::write(watch_help_marker(), "");
+    }
     crate::update::notify("Work folder changed", &format!("Now {}", new.display()));
     std::thread::sleep(Duration::from_secs(4)); // let the notification show (refresh every 3 s)
     crate::update::restart_self();
@@ -383,20 +352,18 @@ fn apply(old: &Path, new: &Path, move_data: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use objc2_foundation::{NSData, NSDataBase64DecodingOptions, NSURLBookmarkResolutionOptions};
 
     #[test]
-    fn bookmark_resolves_to_the_folder() {
+    fn tells_plain_bookmarks() {
+        use objc2_foundation::{NSDataBase64EncodingOptions, NSURLBookmarkCreationOptions};
         let dir = std::env::temp_dir().join(format!("tt-bookmark-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let b64 = bookmark(&dir).unwrap();
-        let data = NSData::initWithBase64EncodedString_options(NSData::alloc(), &ns(&b64), NSDataBase64DecodingOptions::empty()).unwrap();
-        let url = unsafe {
-            NSURL::URLByResolvingBookmarkData_options_relativeToURL_bookmarkDataIsStale_error(
-                &data, NSURLBookmarkResolutionOptions::empty(), None, std::ptr::null_mut())
-        }.unwrap();
-        let resolved = PathBuf::from(url.path().unwrap().to_string());
-        assert_eq!(resolved.canonicalize().unwrap(), dir.canonicalize().unwrap());
+        let url = NSURL::fileURLWithPath_isDirectory(&ns(&dir.to_string_lossy()), true);
+        let b64 = |o| url.bookmarkDataWithOptions_includingResourceValuesForKeys_relativeToURL_error(o, None, None)
+            .unwrap().base64EncodedStringWithOptions(NSDataBase64EncodingOptions::empty()).to_string();
+        assert!(plain_bookmark(&b64(NSURLBookmarkCreationOptions::empty())));
+        assert!(!plain_bookmark(&b64(NSURLBookmarkCreationOptions::WithSecurityScope)));
+        assert!(!plain_bookmark("not base64"));
         assert_eq!(with_slash(Path::new("/a/b")), "/a/b/");
         assert_eq!(with_slash(Path::new("/a/b/")), "/a/b/");
         let _ = std::fs::remove_dir_all(&dir);
@@ -419,26 +386,5 @@ mod tests {
         assert!(move_contents(&a, &b).is_err());
         assert_eq!(std::fs::read_to_string(b.join("x.m4a")).unwrap(), "1");
         let _ = std::fs::remove_dir_all(&root);
-    }
-}
-
-#[cfg(test)]
-mod window_tests {
-    use super::*;
-
-    /// Run with --ignored: some running app has windows on screen.
-    #[test]
-    #[ignore]
-    fn sees_windows_of_running_apps() {
-        let ws = objc2_app_kit::NSWorkspace::sharedWorkspace();
-        let mut seen = Vec::new();
-        for a in ws.runningApplications().iter() {
-            let n = windows_on_screen(a.processIdentifier());
-            if n > 0 {
-                seen.push(format!("{} {n}", a.localizedName().map(|s| s.to_string()).unwrap_or_default()));
-            }
-        }
-        println!("apps with windows on screen: {seen:?}");
-        assert!(!seen.is_empty());
     }
 }

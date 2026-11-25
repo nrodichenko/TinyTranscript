@@ -63,14 +63,15 @@ zoom-s2s-account-id -w` (and `zoom-s2s-client-id`, `zoom-s2s-client-secret`).
 `~/Downloads/recordings` unless changed with "Change work folder…" in the menu (saved in
 `~/Library/Application Support/TinyTranscript/settings.json`). Changing it can move the waiting
 recordings, transcripts, settings and logs along, or start empty (choosing a folder that already
-is a work folder switches to it). MacWhisper reads its watch folders only when it starts, so if it
-watched the old folder it is quit (never while transcribing), its preferences are backed up
-(`speaker-matching/macwhisper-prefs-backup-*.plist`; `defaults import com.goodsnooze.MacWhisper
-<file>` restores one), its watch folder is pointed at the new one (its other watch folders and
-settings stay as they are), and it comes back as it was: not started if it was not running, hidden
-if it ran without a window, normally if its window was open. Choosing the current folder again, or "Make MacWhisper watch the work folder…"
-(shown when it does not), adds the watch the same way. The menu warns when MacWhisper does not
-watch the work folder. `TinyTranscript work-folder` shows both.
+is a work folder switches to it); not while MacWhisper is transcribing.
+
+MacWhisper then has to watch the new folder. It keeps each watch folder as a security-scoped
+bookmark, which macOS lets only MacWhisper itself create, so the folder can only be added in
+MacWhisper's Settings > Watch Folder (an entry written into its preferences by another app is
+listed but never watched). TinyTranscript shows the steps, puts the path on the clipboard, opens
+MacWhisper and says when the watch is in place. The menu warns when MacWhisper does not watch the
+work folder or cannot open its entry for it, and "Make MacWhisper watch the work folder…" shows
+the steps again. `TinyTranscript work-folder` prints both.
 
 ## Updates
 

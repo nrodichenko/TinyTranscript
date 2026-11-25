@@ -54,21 +54,17 @@ fn main() {
                 }
                 std::process::exit(0)
             }
-            // work-folder [--retarget OLD NEW BACKUP_DIR]: show the work folder and whether MacWhisper
-            // watches it; --retarget points MacWhisper's watch folder (TT_MW_PREFS_DOMAIN for a test copy)
+            // work-folder: show the work folder and MacWhisper's watch folders
             "work-folder" => {
-                if all.get(2).is_some_and(|a| a == "--retarget") && all.len() == 6 {
-                    let p = |i: usize| std::path::PathBuf::from(&all[i]);
-                    if let Err(e) = menubar::workfolder::retarget_macwhisper(&p(3), &p(4), &p(5)) {
-                        die(&format!("{e:#}"));
-                    }
-                }
                 let wf = pipeline_common::recordings();
                 println!("work folder: {}", wf.display());
-                println!("MacWhisper watches it: {:?}", menubar::workfolder::macwhisper_watches(&wf));
-                println!("MacWhisper now: {}", menubar::workfolder::macwhisper_state());
-                for (path, on) in menubar::workfolder::watched_folders() {
-                    println!("  watched: {path}{}", if on { "" } else { " (off)" });
+                println!("MacWhisper watches it: {:?}", menubar::workfolder::macwhisper_watch(&wf));
+                for w in menubar::workfolder::watched_folders() {
+                    println!("  watched: {}{}{}", w.path, if w.enabled { "" } else { " (off)" },
+                             if w.unusable { " (MacWhisper cannot open this entry: add the folder again in its settings)" } else { "" });
+                }
+                if menubar::workfolder::macwhisper_log_cannot_open(&wf) {
+                    println!("MacWhisper's log: it could not open the work folder when it started");
                 }
                 std::process::exit(0)
             }
