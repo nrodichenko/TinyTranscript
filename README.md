@@ -24,7 +24,8 @@ them, and TinyTranscript names the speakers by voice, gives each transcript a ti
   recognized at once.
   "Edit title…" gives a transcript a title of your own: its files are renamed (the date and the
   people stay) and the title is kept from then on (`TinyTranscript set-title FILE.txt TITLE` does
-  the same).
+  the same). "Not in this call" on a speaker (a recording played back during the call, say) leaves
+  them out of the file name and stops their "unresolved" warning; choosing it again undoes it.
 - **Titles and files.** Recordings without a meaningful name get a short title written by Claude
   (Claude Code, `claude -p`, Haiku) from the transcript; free-form Drive file names are read the
   same way. The other people in the call are added to the name (`_with_Anna_Peter`, transliterated

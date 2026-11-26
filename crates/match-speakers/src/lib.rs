@@ -66,8 +66,15 @@ options:
 
 /// What a re-check of a transcript (new voiceprints, a speaker renamed) keeps from its earlier
 /// record; base_stem is the name without the '_with_<names>' part, which finish() rebuilds from it.
-const KEEP_ON_REPROCESS: [&str; 7] = ["macwhisper_name", "renamed_from", "title", "title_source", "base_stem",
-                                      "inbox_audio", "exclude_sessions"];
+const KEEP_ON_REPROCESS: [&str; 8] = ["macwhisper_name", "renamed_from", "title", "title_source", "base_stem",
+                                      "inbox_audio", "exclude_sessions", "not_in_call"];
+
+/// MacWhisper speaker ids the user marked "Not in this call" in a transcript (a recording played
+/// back during the call, say): left out of its file name and not counted as unresolved.
+fn not_in_call(entry: &Map<String, Value>) -> Vec<String> {
+    entry.get("not_in_call").and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default()
+}
 
 // ------------------------------------------------------------------ paths
 
@@ -917,8 +924,9 @@ fn process(txt: &Path, cfg: &Cfg, state: &mut Map<String, Value>, vps: &[Voicepr
     }
     common::write_atomic(&out_path, &text::relabel(&text, &new_label_for))?;
 
+    let away = not_in_call(&prev);
     let mut unresolved: Vec<String> = result.iter()
-        .filter(|r| !r.resolved && r.seconds > 0.0)
+        .filter(|r| !r.resolved && r.seconds > 0.0 && !away.contains(&r.speaker_id))
         .map(|r| if py::truthy(Some(&r.label)) { py::str_of(&r.label) } else { py::str_of(&r.current) })
         .collect();
     unresolved.sort();
@@ -1067,18 +1075,24 @@ fn titles_pending() -> Map<String, Value> {
 /// The other people named for sure in a transcript (see names::people_from), with speech times
 /// from its report.
 fn people_in(stem: &str, entry: &Map<String, Value>, cfg: &Cfg) -> Vec<String> {
-    let labels = obj(entry.get("labels"));
+    let mut labels = obj(entry.get("labels"));
+    let away = not_in_call(entry);
     let mut seconds: HashMap<String, f64> = HashMap::new();
+    let (mut in_call, mut out) = (BTreeSet::new(), BTreeSet::new());
     if let Some(Value::Object(rep)) = common::load_json(&reports().join(format!("{stem}.json"))) {
         if let Some(Value::Array(sps)) = rep.get("speakers") {
             for sp in sps {
                 if let Some(lab) = sp.get("label").filter(|l| py::truthy(Some(l))) {
                     let s = sp.get("seconds").and_then(Value::as_f64).unwrap_or(0.0);
                     *seconds.entry(py::str_of(lab)).or_insert(0.0) += s;
+                    let id = sp.get("speaker_id").and_then(Value::as_str).unwrap_or("");
+                    if away.iter().any(|a| a == id) { out.insert(py::str_of(lab)) } else { in_call.insert(py::str_of(lab)) };
                 }
             }
         }
     }
+    // a person heard only from speakers marked "Not in this call" is not in the file name
+    labels.retain(|_, v| v.as_str().is_none_or(|l| !out.contains(l) || in_call.contains(l)));
     names::people_from(&labels, &seconds, cfg)
 }
 
@@ -1261,14 +1275,54 @@ pub fn set_title(name: &str, title: &str) -> Result<String> {
     state.insert(name.to_string(), Value::Object(entry));
     finish(name, &mut state, &cfg, &Map::new())?;
     write_json(&state_file(), &Value::Object(state.clone()), 2)?;
-    // finish() moved the record to the new name, with renamed_from = the old stem
-    let new_name = if state.contains_key(name) { name.to_string() } else {
-        state.iter().find(|(_, e)| e.get("renamed_from").and_then(Value::as_str) == Some(stem.as_str())
-                                   && e.get("session") == session.as_ref())
-            .map(|(k, _)| k.clone()).unwrap_or_default()
-    };
+    let new_name = renamed_to(&state, name, &stem, session.as_ref());
     log(&format!("{name}: title set by hand -> {new_name}"));
     Ok(new_name)
+}
+
+/// Mark the speaker `speaker_id` of the finished transcript `name` as not in the call (`away`) or
+/// in it again: the file name is rebuilt without (or with) them. Returns the new file name.
+pub fn set_not_in_call(name: &str, speaker_id: &str, away: bool) -> Result<String> {
+    let _lock = common::lock(&lock_file())?;
+    let cfg = Cfg::from_value(&common::load_config(&config_file(), &default_config(), true))?;
+    let mut state = load_json_obj(&state_file());
+    let mut entry = obj(state.get(name));
+    if !status_done(&entry) || !processed().join(name).exists() {
+        bail!("{name} is not a finished transcript");
+    }
+    let stem = py::stem(name).to_string();
+    let session = entry.get("session").cloned();
+    let mut ids = not_in_call(&entry);
+    ids.retain(|i| i != speaker_id);
+    if away {
+        ids.push(speaker_id.to_string());
+    }
+    entry.insert("not_in_call".into(), json!(ids));
+    // unresolved as the report has it, less the speakers not in the call
+    if let Some(Value::Object(rep)) = common::load_json(&reports().join(format!("{stem}.json"))) {
+        let mut unresolved: Vec<String> = rep.get("speakers").and_then(Value::as_array).into_iter().flatten()
+            .filter(|r| !r["resolved"].as_bool().unwrap_or(false) && r["seconds"].as_f64().unwrap_or(0.0) > 0.0
+                && !ids.iter().any(|i| Some(i.as_str()) == r["speaker_id"].as_str()))
+            .map(|r| if py::truthy(Some(&r["label"])) { py::str_of(&r["label"]) } else { py::str_of(&r["current"]) })
+            .collect();
+        unresolved.sort();
+        entry.insert("unresolved".into(), json!(unresolved));
+    }
+    state.insert(name.to_string(), Value::Object(entry));
+    finish(name, &mut state, &cfg, &Map::new())?;
+    write_json(&state_file(), &Value::Object(state.clone()), 2)?;
+    let new_name = renamed_to(&state, name, &stem, session.as_ref());
+    log(&format!("{name}: speaker {speaker_id} marked {} -> {new_name}", if away { "not in this call" } else { "in the call again" }));
+    Ok(new_name)
+}
+
+/// The name the record of `name` (stem `stem`) has after finish(): it may have been renamed.
+fn renamed_to(state: &Map<String, Value>, name: &str, stem: &str, session: Option<&Value>) -> String {
+    if state.contains_key(name) {
+        return name.to_string();
+    }
+    state.iter().find(|(_, e)| e.get("renamed_from").and_then(Value::as_str) == Some(stem) && e.get("session") == session)
+        .map(|(k, _)| k.clone()).unwrap_or_default()
 }
 
 /// Tell the menu bar app a recording is finished; it shows a notification that opens it.
@@ -1537,6 +1591,47 @@ mod reuse_tests {
         assert_eq!(e["title_source"], "user");
         assert_eq!(e["macwhisper_name"], "20261126_-_Zoom_call_1614");
         assert!(KEEP_ON_REPROCESS.contains(&"title") && KEEP_ON_REPROCESS.contains(&"base_stem"));
+        std::env::remove_var("RECORDINGS_ROOT");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A speaker marked "Not in this call" (a recording played back) leaves the file name and the
+    /// unresolved list; unmarking brings them back.
+    #[test]
+    fn speaker_not_in_call() {
+        let _g = TEST_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("away-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let root = dir.join("root");
+        for d in ["speaker-matching/originals", "speaker-matching/reports", "processed/audio"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::env::set_var("RECORDINGS_ROOT", &root);
+        let old = "20261126_-_Plan_with_Anna_Carla";
+        fs::write(processed().join(format!("{old}.txt")), "x").unwrap();
+        fs::write(processed_audio().join(format!("{old}.m4a")), "x").unwrap();
+        fs::write(reports().join(format!("{old}.json")), r#"{"speakers": [
+            {"speaker_id": "A1", "label": "Anna", "current": "Speaker 1", "seconds": 100.0, "resolved": true},
+            {"speaker_id": "B2", "label": "Carla", "current": "Speaker 2", "seconds": 50.0, "resolved": true},
+            {"speaker_id": "C3", "label": "Speaker 3", "current": "Speaker 3", "seconds": 20.0, "resolved": false}]}"#).unwrap();
+        common::save_json(&config_file(), &default_config()).unwrap();
+        let state = json!({format!("{old}.txt"): {"status": "done", "session": "01", "base_stem": "20261126_-_Plan",
+            "unresolved": ["Speaker 3"],
+            "labels": {"Speaker 1": "Anna", "Speaker 2": "Carla", "Speaker 3": "Speaker 3"}}});
+        write_json(&state_file(), &state, 2).unwrap();
+
+        let a = set_not_in_call(&format!("{old}.txt"), "B2", true).unwrap();
+        assert_eq!(a, "20261126_-_Plan_with_Anna.txt");
+        assert!(processed_audio().join("20261126_-_Plan_with_Anna.m4a").exists());
+        let b = set_not_in_call(&a, "C3", true).unwrap();
+        assert_eq!(b, a);
+        let st = load_json_obj(&state_file());
+        assert_eq!(st[&a]["not_in_call"], json!(["B2", "C3"]));
+        assert_eq!(st[&a]["unresolved"], json!([]));
+        assert!(KEEP_ON_REPROCESS.contains(&"not_in_call"));
+        let c = set_not_in_call(&a, "B2", false).unwrap();
+        assert_eq!(c, format!("{old}.txt"));
+        assert_eq!(load_json_obj(&state_file())[&c]["not_in_call"], json!(["C3"]));
         std::env::remove_var("RECORDINGS_ROOT");
         let _ = fs::remove_dir_all(&dir);
     }

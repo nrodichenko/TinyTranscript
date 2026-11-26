@@ -6,6 +6,7 @@
 //!                                               run one job once by hand (--dry-run, --force, ...)
 //!     recordings_menubar setup                  first-time setup on a new Mac (setup.rs)
 //!     recordings_menubar set-title FILE.txt TITLE  retitle a finished transcript (as the menu does)
+//!     recordings_menubar not-in-call FILE.txt SPEAKER [--undo]  leave a speaker out of the file name
 //!     recordings_menubar install-agent          (re)install the launch agent for this program
 //!     recordings_menubar --render-preview DIR   draw the menu (light/dark) and icons to PNGs in DIR
 //!     recordings_menubar --icon-sheet FILE.png  every icon style in every state on one sheet
@@ -47,6 +48,16 @@ fn main() {
                 }
                 Err(e) => die(&format!("{e:#}")),
             },
+            // not-in-call TRANSCRIPT.txt SPEAKER_HEX [--undo]: what "Not in this call" in the menu does
+            "not-in-call" if all.len() == 4 || (all.len() == 5 && all[4] == "--undo") => {
+                match match_speakers::set_not_in_call(&all[2], &all[3], all.len() == 4) {
+                    Ok(new) => {
+                        println!("{new}");
+                        std::process::exit(0)
+                    }
+                    Err(e) => die(&format!("{e:#}")),
+                }
+            }
             // update [--check]: look for a newer release; without --check install it (and restart)
             "update" => {
                 let check_only = all.get(2).is_some_and(|a| a == "--check");
@@ -110,7 +121,7 @@ fn main() {
         return;
     }
     if let Some(a) = args.iter().find(|a| a.starts_with('-')) {
-        die(&format!("unknown option {a}\nusage: recordings_menubar [--version | setup | install-agent | work-folder | requeue --check | set-title FILE.txt TITLE | zoom-fetch|drive-fetch|match-speakers ARGS | --render-preview DIR | --icon-sheet FILE.png]"));
+        die(&format!("unknown option {a}\nusage: recordings_menubar [--version | setup | install-agent | work-folder | requeue --check | set-title FILE.txt TITLE | not-in-call FILE.txt SPEAKER [--undo] | zoom-fetch|drive-fetch|match-speakers ARGS | --render-preview DIR | --icon-sheet FILE.png]"));
     }
     // Opened from the Finder before setup: run the setup in Terminal instead. Once a setup has
     // been started (and maybe abandoned), install the launch agent, which starts the app; the

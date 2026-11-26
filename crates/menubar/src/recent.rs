@@ -2,7 +2,8 @@
 //! named from the list of people MacWhisper knows, or with a new name. The name is written into
 //! MacWhisper's library with the speaker's voiceprint (match_speakers::mw_write), then the speaker
 //! job re-checks the transcript, which relabels it and renames its files ('_with_...').
-//! "Edit title…" gives a transcript a title typed by hand, kept from then on.
+//! "Edit title…" gives a transcript a title typed by hand, kept from then on. "Not in this call"
+//! on a speaker (a recording played back during the call, say) leaves them out of the file name.
 
 use crate::app::{menu_item, Controller};
 use objc2::rc::Retained;
@@ -32,6 +33,8 @@ thread_local! {
     static FILES: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
     /// (file name in processed/, current title) for "Edit title…"
     static TITLES: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
+    /// (file name in processed/, speaker id, mark as not in the call) for "Not in this call"
+    static AWAY: RefCell<Vec<(String, String, bool)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// (notification title, text) from renames running on their own thread.
@@ -72,6 +75,7 @@ pub(crate) fn rebuild(menu: &NSMenu, mtm: MainThreadMarker, controller: &Control
     TARGETS.with(|t| t.borrow_mut().clear());
     FILES.with(|f| f.borrow_mut().clear());
     TITLES.with(|t| t.borrow_mut().clear());
+    AWAY.with(|t| t.borrow_mut().clear());
     let state: Map<String, Value> = pipeline_common::load_json(&meta.join("state.json"))
         .and_then(|v| v.as_object().cloned()).unwrap_or_default();
     let mut done: Vec<(&String, &Value)> = state.iter()
@@ -113,18 +117,33 @@ pub(crate) fn rebuild(menu: &NSMenu, mtm: MainThreadMarker, controller: &Control
         let mut speakers: Vec<Value> = report.as_ref().and_then(|r| r["speakers"].as_array().cloned()).unwrap_or_default();
         speakers.retain(|s| s["seconds"].as_f64().unwrap_or(0.0) >= 1.0 && s["speaker_id"].as_str().is_some());
         speakers.sort_by(|a, b| b["seconds"].as_f64().partial_cmp(&a["seconds"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
+        let away: Vec<&str> = entry.get("not_in_call").and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
         let mut unknown = 0;
         for sp in &speakers {
+            let speaker_id = sp["speaker_id"].as_str().unwrap_or("").to_string();
+            let is_away = away.contains(&speaker_id.as_str());
             let current = sp["current"].as_str().unwrap_or("").to_string(); // the name in MacWhisper
             let label = sp["label"].as_str().unwrap_or("").to_string(); // the name in the transcript
             let resolved = sp["resolved"].as_bool().unwrap_or(false);
             let shown = if label.is_empty() { current.clone() } else { label.clone() };
-            if !resolved {
+            if !resolved && !is_away {
                 unknown += 1;
             }
-            let sp_title = format!("{shown}{} · {}", if resolved { "" } else { "  ⚠︎" }, minutes(sp["seconds"].as_f64().unwrap_or(0.0)));
+            let sp_title = format!("{shown}{} · {}{}", if resolved || is_away { "" } else { "  ⚠︎" },
+                                   minutes(sp["seconds"].as_f64().unwrap_or(0.0)), if is_away { " · not in this call" } else { "" });
             let sp_item = menu_item(mtm, &sp_title, None, controller);
             let sp_menu = NSMenu::new(mtm);
+            let out = menu_item(mtm, "Not in this call", Some(sel!(notInCall:)), controller);
+            if is_away {
+                out.setState(NSControlStateValueOn);
+            }
+            AWAY.with(|t| {
+                out.setTag(t.borrow().len() as isize);
+                t.borrow_mut().push((key.clone(), speaker_id.clone(), !is_away));
+            });
+            sp_menu.addItem(&out);
+            sp_menu.addItem(&sep(mtm));
             let target = |name: Option<String>| Target {
                 session: session.clone(), speaker: sp["speaker_id"].as_str().unwrap_or("").to_string(),
                 transcript: key.clone(), title: title.clone(), from: shown.clone(), name,
@@ -231,6 +250,18 @@ pub fn edit_title(mtm: MainThreadMarker, tag: isize) {
         let msg = match match_speakers::set_title(&name, &title) {
             Ok(new) => ("Title changed".to_string(), new),
             Err(e) => ("Could not change the title".to_string(), format!("{e:#}")),
+        };
+        RESULTS.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
+    });
+}
+
+/// "Not in this call" `tag` was chosen: mark the speaker, or unmark them.
+pub fn not_in_call(tag: isize) {
+    let Some((name, speaker, away)) = AWAY.with(|t| t.borrow().get(tag as usize).cloned()) else { return };
+    std::thread::spawn(move || {
+        let msg = match match_speakers::set_not_in_call(&name, &speaker, away) {
+            Ok(new) => (if away { "Left out of the call" } else { "Back in the call" }.to_string(), new),
+            Err(e) => ("Could not change the speaker".to_string(), format!("{e:#}")),
         };
         RESULTS.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
     });

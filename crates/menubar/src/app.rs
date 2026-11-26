@@ -151,6 +151,11 @@ define_class!(
             crate::recent::rename(self.mtm(), sender.tag());
         }
 
+        #[unsafe(method(notInCall:))]
+        fn not_in_call(&self, sender: &NSMenuItem) {
+            crate::recent::not_in_call(sender.tag());
+        }
+
         #[unsafe(method(editTitle:))]
         fn edit_title(&self, sender: &NSMenuItem) {
             crate::recent::edit_title(self.mtm(), sender.tag());
