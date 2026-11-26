@@ -1232,6 +1232,45 @@ fn finish(name: &str, state: &mut Map<String, Value>, cfg: &Cfg, pending: &Map<S
     Ok(true)
 }
 
+/// Longest title typed by hand (the date and the '_with_' names come on top).
+const OWN_TITLE_MAX: i64 = 80;
+
+/// Give the finished transcript `name` (its file name in processed/) the title `title`, typed by
+/// the user: its files are renamed ('<date>_-_<title>_with_<people>') and the title is kept from
+/// then on (a re-check never writes a new one). Returns the new file name.
+pub fn set_title(name: &str, title: &str) -> Result<String> {
+    let title = names::fit_title(&names::clean_title(title), OWN_TITLE_MAX);
+    if !title.chars().any(char::is_alphanumeric) {
+        bail!("the title is empty");
+    }
+    // the speaker job writes the same state: wait for its run to finish
+    let _lock = common::lock(&lock_file())?;
+    let cfg = Cfg::from_value(&common::load_config(&config_file(), &default_config(), true))?;
+    let mut state = load_json_obj(&state_file());
+    let mut entry = obj(state.get(name));
+    if !status_done(&entry) || !processed().join(name).exists() {
+        bail!("{name} is not a finished transcript");
+    }
+    let stem = py::stem(name).to_string();
+    let session = entry.get("session").cloned();
+    let base = entry.get("base_stem").filter(|v| py::truthy(Some(v))).map(py::str_of).unwrap_or_else(|| stem.clone());
+    let date = Regex::new(r"^\d{8}_-_").unwrap().find(&base).map(|m| m.as_str().to_string()).unwrap_or_default();
+    entry.insert("title".into(), json!(title));
+    entry.insert("title_source".into(), json!("user"));
+    entry.insert("base_stem".into(), json!(format!("{date}{}", title.replace(' ', "_"))));
+    state.insert(name.to_string(), Value::Object(entry));
+    finish(name, &mut state, &cfg, &Map::new())?;
+    write_json(&state_file(), &Value::Object(state.clone()), 2)?;
+    // finish() moved the record to the new name, with renamed_from = the old stem
+    let new_name = if state.contains_key(name) { name.to_string() } else {
+        state.iter().find(|(_, e)| e.get("renamed_from").and_then(Value::as_str) == Some(stem.as_str())
+                                   && e.get("session") == session.as_ref())
+            .map(|(k, _)| k.clone()).unwrap_or_default()
+    };
+    log(&format!("{name}: title set by hand -> {new_name}"));
+    Ok(new_name)
+}
+
 /// Tell the menu bar app a recording is finished; it shows a notification that opens it.
 fn announce_ready(stem: &str, people: &[String]) -> Result<()> {
     static DATE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
@@ -1455,6 +1494,50 @@ mod reuse_tests {
         assert_eq!(st["rec.txt"]["session"], "01");
         std::env::remove_var("RECORDINGS_ROOT");
         std::env::remove_var("RECORDINGS_MW_DB");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A title typed by hand renames every file of the transcript, keeps the date and the
+    /// people, and is kept on a re-check (KEEP_ON_REPROCESS).
+    #[test]
+    fn title_set_by_hand() {
+        let _g = TEST_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("title-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let root = dir.join("root");
+        for d in ["speaker-matching/originals", "speaker-matching/reports", "processed/audio"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::env::set_var("RECORDINGS_ROOT", &root);
+        let old = "20261126_-_Wrong_title_with_Anna";
+        for (d, ext) in [(processed(), ".txt"), (originals(), ".txt"), (reports(), ".json"), (processed_audio(), ".m4a")] {
+            fs::write(d.join(format!("{old}{ext}")), "x").unwrap();
+        }
+        fs::write(reports().join(format!("{old}.json")),
+                  r#"{"speakers": [{"label": "Anna", "seconds": 100.0}, {"label": "Boris", "seconds": 90.0}]}"#).unwrap();
+        let mut cfg = default_config();
+        cfg["self_names"] = json!(["Boris"]);
+        common::save_json(&config_file(), &cfg).unwrap();
+        let state = json!({format!("{old}.txt"): {"status": "done", "session": "01", "title": "Wrong title",
+            "base_stem": "20261126_-_Wrong_title", "macwhisper_name": "20261126_-_Zoom_call_1614",
+            "labels": {"Speaker 1": "Anna", "Speaker 2": "Boris"}}});
+        write_json(&state_file(), &state, 2).unwrap();
+
+        assert!(set_title(&format!("{old}.txt"), "  ").is_err());
+        let new = set_title(&format!("{old}.txt"), "Budget: Q3 / plan").unwrap();
+        let stem = "20261126_-_Budget_Q3_plan_with_Anna";
+        assert_eq!(new, format!("{stem}.txt"));
+        for (d, ext) in [(processed(), ".txt"), (originals(), ".txt"), (reports(), ".json"), (processed_audio(), ".m4a")] {
+            assert!(d.join(format!("{stem}{ext}")).exists(), "{}{ext}", d.display());
+            assert!(!d.join(format!("{old}{ext}")).exists());
+        }
+        let st = load_json_obj(&state_file());
+        let e = &st[&new];
+        assert_eq!(e["title"], "Budget Q3 plan");
+        assert_eq!(e["title_source"], "user");
+        assert_eq!(e["macwhisper_name"], "20261126_-_Zoom_call_1614");
+        assert!(KEEP_ON_REPROCESS.contains(&"title") && KEEP_ON_REPROCESS.contains(&"base_stem"));
+        std::env::remove_var("RECORDINGS_ROOT");
         let _ = fs::remove_dir_all(&dir);
     }
 

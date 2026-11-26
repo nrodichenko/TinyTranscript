@@ -22,6 +22,9 @@ them, and TinyTranscript names the speakers by voice, gives each transcript a ti
   any speaker can be named from the people MacWhisper knows or with a new name. The name goes into
   MacWhisper's library (see below) together with the speaker's voiceprint, so later recordings are
   recognized at once.
+  "Edit title…" gives a transcript a title of your own: its files are renamed (the date and the
+  people stay) and the title is kept from then on (`TinyTranscript set-title FILE.txt TITLE` does
+  the same).
 - **Titles and files.** Recordings without a meaningful name get a short title written by Claude
   (Claude Code, `claude -p`, Haiku) from the transcript; free-form Drive file names are read the
   same way. The other people in the call are added to the name (`_with_Anna_Peter`, transliterated

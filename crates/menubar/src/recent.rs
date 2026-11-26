@@ -2,6 +2,7 @@
 //! named from the list of people MacWhisper knows, or with a new name. The name is written into
 //! MacWhisper's library with the speaker's voiceprint (match_speakers::mw_write), then the speaker
 //! job re-checks the transcript, which relabels it and renames its files ('_with_...').
+//! "Edit title…" gives a transcript a title typed by hand, kept from then on.
 
 use crate::app::{menu_item, Controller};
 use objc2::rc::Retained;
@@ -29,6 +30,8 @@ struct Target {
 thread_local! {
     static TARGETS: RefCell<Vec<Target>> = const { RefCell::new(Vec::new()) };
     static FILES: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+    /// (file name in processed/, current title) for "Edit title…"
+    static TITLES: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// (notification title, text) from renames running on their own thread.
@@ -68,6 +71,7 @@ pub(crate) fn rebuild(menu: &NSMenu, mtm: MainThreadMarker, controller: &Control
     menu.removeAllItems();
     TARGETS.with(|t| t.borrow_mut().clear());
     FILES.with(|f| f.borrow_mut().clear());
+    TITLES.with(|t| t.borrow_mut().clear());
     let state: Map<String, Value> = pipeline_common::load_json(&meta.join("state.json"))
         .and_then(|v| v.as_object().cloned()).unwrap_or_default();
     let mut done: Vec<(&String, &Value)> = state.iter()
@@ -98,6 +102,12 @@ pub(crate) fn rebuild(menu: &NSMenu, mtm: MainThreadMarker, controller: &Control
             f.borrow_mut().push(processed.join(key));
         });
         sub.addItem(&open);
+        let edit = menu_item(mtm, "Edit title…", Some(sel!(editTitle:)), controller);
+        TITLES.with(|t| {
+            edit.setTag(t.borrow().len() as isize);
+            t.borrow_mut().push((key.clone(), title.clone()));
+        });
+        sub.addItem(&edit);
         sub.addItem(&sep(mtm));
         let report = pipeline_common::load_json(&meta.join("reports").join(format!("{stem}.json")));
         let mut speakers: Vec<Value> = report.as_ref().and_then(|r| r["speakers"].as_array().cloned()).unwrap_or_default();
@@ -189,6 +199,41 @@ fn ask_name(mtm: MainThreadMarker, from: &str, title: &str) -> Option<String> {
     let name = field.stringValue().to_string();
     let name = name.trim();
     (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Ask for a title, showing the current one.
+fn ask_title(mtm: MainThreadMarker, current: &str) -> Option<String> {
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str("Title of the transcript"));
+    alert.setInformativeText(&NSString::from_str("The files are renamed to it; the date and the people stay. It is kept from now on."));
+    alert.addButtonWithTitle(&NSString::from_str("Save"));
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    let field = NSTextField::initWithFrame(NSTextField::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.0, 24.0)));
+    field.setStringValue(&NSString::from_str(current));
+    alert.setAccessoryView(Some(&field));
+    alert.window().setInitialFirstResponder(Some(&field));
+    #[allow(deprecated)]
+    NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    if alert.runModal() != NSAlertFirstButtonReturn {
+        return None;
+    }
+    let t = field.stringValue().to_string();
+    let t = t.trim();
+    (!t.is_empty() && t != current).then(|| t.to_string())
+}
+
+/// "Edit title…" `tag` was chosen.
+pub fn edit_title(mtm: MainThreadMarker, tag: isize) {
+    let Some((name, current)) = TITLES.with(|t| t.borrow().get(tag as usize).cloned()) else { return };
+    let Some(title) = ask_title(mtm, &current) else { return };
+    // waits for a running speaker job: off the main thread
+    std::thread::spawn(move || {
+        let msg = match match_speakers::set_title(&name, &title) {
+            Ok(new) => ("Title changed".to_string(), new),
+            Err(e) => ("Could not change the title".to_string(), format!("{e:#}")),
+        };
+        RESULTS.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
+    });
 }
 
 /// The menu item `tag` was chosen: name the speaker (asking for the name for "New name…").

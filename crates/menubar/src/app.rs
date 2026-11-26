@@ -151,6 +151,11 @@ define_class!(
             crate::recent::rename(self.mtm(), sender.tag());
         }
 
+        #[unsafe(method(editTitle:))]
+        fn edit_title(&self, sender: &NSMenuItem) {
+            crate::recent::edit_title(self.mtm(), sender.tag());
+        }
+
         #[unsafe(method(renameSpeakerNew:))]
         fn rename_speaker_new(&self, sender: &NSMenuItem) {
             crate::recent::rename(self.mtm(), sender.tag());
