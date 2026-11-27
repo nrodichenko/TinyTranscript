@@ -34,6 +34,8 @@ pub const JOBS: [(&str, &str, &str); 3] = [
     ("Zoom", "local.zoom-recordings", "zoom.log"),
     ("Drive", "local.drive-recordings", "drive.log"),
 ];
+/// How long a row shows "running" after its "check now" button is clicked, at least.
+const SHOW_KICK: std::time::Duration = std::time::Duration::from_secs(3);
 const HEARTBEATS: [(&str, &str); 2] = [("local.zoom-recordings", ".zoom-checked"), ("local.drive-recordings", ".drive-checked")];
 /// Telegram row states. The listener states of the Python app are kept for the column width.
 const TG_LABELS: [(&str, &str); 8] = [
@@ -249,6 +251,8 @@ pub struct App {
     notifier: Option<Notifier>,
     ready_offset: Cell<u64>,
     tg_paused: Cell<bool>,
+    /// when "check now" was clicked, per job: the row shows "running" for at least SHOW_KICK
+    kicked_at: RefCell<HashMap<String, std::time::Instant>>,
     timer: RefCell<Option<Retained<NSTimer>>>,
 }
 
@@ -456,6 +460,7 @@ impl App {
             notifier,
             ready_offset: Cell::new(ready_offset),
             tg_paused: Cell::new(false),
+            kicked_at: RefCell::new(HashMap::new()),
             timer: RefCell::new(None),
         })
     }
@@ -514,6 +519,7 @@ impl App {
 
     pub fn kick(&self, label: &str) {
         status::kick(label);
+        self.kicked_at.borrow_mut().insert(label.to_string(), std::time::Instant::now());
         self.refresh();
     }
 
@@ -638,7 +644,12 @@ impl App {
         paused |= self.tg_paused.get();
 
         for (name, label, logf) in JOBS {
-            let running = status::job_running(label);
+            let mut running = status::job_running(label);
+            // a check often takes less than a second: show a click on "check now" for a while
+            let just_kicked = self.kicked_at.borrow().get(label).is_some_and(|t| t.elapsed() < SHOW_KICK);
+            if running == Some(false) && (just_kicked || crate::jobs::is_job(label) && crate::jobs::kicked(label)) {
+                running = Some(true);
+            }
             let off = running.is_none() && status::job_paused(label);
             let line = last_line(&p.meta.join(logf));
             let when = if is_stamped(&line) { head(&line, 16) } else { String::new() };

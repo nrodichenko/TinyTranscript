@@ -134,6 +134,11 @@ pub fn kick(label: &str) {
     with(|s| s.kicked.insert(label.to_string()));
 }
 
+/// Asked to run (kick) and not started yet.
+pub fn kicked(label: &str) -> bool {
+    with(|s| s.kicked.contains(label))
+}
+
 /// A cheap fingerprint of the recordings folder's top level (names, sizes, times).
 fn folder_print() -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
