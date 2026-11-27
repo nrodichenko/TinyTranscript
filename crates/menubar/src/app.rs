@@ -382,6 +382,9 @@ impl App {
         i_inbox.setView(Some(&header.view));
         let header = Some(header);
         let menu = NSMenu::new(mtm);
+        // the header and the rows are views on items without an action: with auto-enabling, macOS
+        // greys those items out when it shows the menu and the buttons in them get no clicks
+        menu.setAutoenablesItems(false);
         let sep = || NSMenuItem::separatorItem(mtm);
         menu.addItem(&i_inbox);
         menu.addItem(&sep());
